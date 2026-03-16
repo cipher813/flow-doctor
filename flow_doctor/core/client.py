@@ -1,0 +1,358 @@
+"""FlowDoctor client: init(), report(), guard(), monitor(), capture_logs()."""
+
+from __future__ import annotations
+
+import functools
+import logging
+import os
+import platform
+import sys
+import traceback as tb_module
+from contextlib import contextmanager
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional
+
+from flow_doctor.core.config import FlowDoctorConfig, load_config
+from flow_doctor.core.dedup import DedupChecker, compute_error_signature, compute_signature_from_exception
+from flow_doctor.core.models import Action, ActionStatus, ActionType, Report, Severity
+from flow_doctor.core.rate_limiter import CascadeDetector, RateLimiter
+from flow_doctor.core.scrubber import Scrubber
+from flow_doctor.notify.base import Notifier
+from flow_doctor.storage.base import StorageBackend
+
+
+class _LogCaptureHandler(logging.Handler):
+    """Non-propagating handler that buffers log records."""
+
+    def __init__(self, level: int = logging.DEBUG):
+        super().__init__(level)
+        self.records: List[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.records.append(self.format(record))
+        except Exception:
+            pass
+
+
+class FlowDoctor:
+    """Main Flow Doctor client."""
+
+    def __init__(self, config: FlowDoctorConfig):
+        self.config = config
+        self._scrubber = Scrubber()
+        self._store = self._init_store(config)
+        self._notifiers = self._init_notifiers(config)
+        self._dedup = DedupChecker(self._store, config.dedup_cooldown_minutes)
+        self._rate_limiter = RateLimiter(self._store, config.rate_limits)
+        self._cascade_detector = CascadeDetector(self._store)
+        self._log_handler: Optional[_LogCaptureHandler] = None
+
+    @staticmethod
+    def _init_store(config: FlowDoctorConfig) -> StorageBackend:
+        if config.store.type == "sqlite":
+            from flow_doctor.storage.sqlite import SQLiteStorage
+            store = SQLiteStorage(config.store.path)
+            store.init_schema()
+            return store
+        raise ValueError(f"Unsupported store type: {config.store.type}")
+
+    @staticmethod
+    def _init_notifiers(config: FlowDoctorConfig) -> List[Notifier]:
+        notifiers: List[Notifier] = []
+        for nc in config.notify:
+            if nc.type == "slack" and nc.webhook_url:
+                from flow_doctor.notify.slack import SlackNotifier
+                notifiers.append(SlackNotifier(nc.webhook_url, nc.channel))
+            elif nc.type == "email" and nc.sender and nc.recipients:
+                from flow_doctor.notify.email import EmailNotifier
+                notifiers.append(EmailNotifier(
+                    sender=nc.sender,
+                    recipients=nc.recipients,
+                    smtp_host=nc.smtp_host,
+                    smtp_port=nc.smtp_port,
+                    smtp_password=nc.smtp_password,
+                ))
+        return notifiers
+
+    def report(
+        self,
+        error: Any = None,
+        *,
+        severity: str = Severity.ERROR.value,
+        context: Optional[Dict[str, Any]] = None,
+        logs: Optional[str] = None,
+        message: Optional[str] = None,
+    ) -> Optional[str]:
+        """Report an error or message. Never crashes the caller.
+
+        Args:
+            error: An exception, string message, or None.
+            severity: One of 'critical', 'error', 'warning'.
+            context: Arbitrary key-value metadata.
+            logs: Log text to attach.
+            message: Explicit message string (alternative to passing a string as error).
+
+        Returns:
+            The report ID, or None if suppressed by dedup.
+        """
+        try:
+            return self._do_report(error, severity=severity, context=context, logs=logs, message=message)
+        except Exception as exc:
+            # report() must NEVER crash the caller
+            print(f"[flow-doctor] Internal error in report(): {exc}", file=sys.stderr)
+            return None
+
+    def _do_report(
+        self,
+        error: Any,
+        *,
+        severity: str,
+        context: Optional[Dict[str, Any]],
+        logs: Optional[str],
+        message: Optional[str],
+    ) -> Optional[str]:
+        """Internal report implementation."""
+        # Build the report
+        error_type: Optional[str] = None
+        error_message: str = ""
+        traceback_str: Optional[str] = None
+        error_signature: Optional[str] = None
+
+        if isinstance(error, BaseException):
+            error_type = type(error).__qualname__
+            error_message = str(error)
+            if error.__traceback__:
+                traceback_str = "".join(tb_module.format_exception(type(error), error, error.__traceback__))
+            else:
+                traceback_str = "".join(tb_module.format_exception_only(type(error), error))
+            error_signature = compute_signature_from_exception(error)
+        elif isinstance(error, str):
+            error_message = error
+            error_signature = compute_error_signature(None, None)
+        elif error is None and message:
+            error_message = message
+            error_signature = compute_error_signature(None, None)
+        elif error is None:
+            error_message = "Unknown error"
+            error_signature = compute_error_signature(None, None)
+        else:
+            error_message = str(error)
+            error_signature = compute_error_signature(None, None)
+
+        # For non-exception string reports, use message content in the signature
+        if error_type is None:
+            import hashlib
+            error_signature = hashlib.sha256(error_message.encode("utf-8")).hexdigest()[:16]
+
+        # Attach captured logs
+        captured_logs = logs
+        if captured_logs is None and self._log_handler is not None:
+            captured_logs = "\n".join(self._log_handler.records)
+
+        # Scrub secrets from traceback and context
+        if traceback_str:
+            traceback_str = self._scrubber.scrub_string(traceback_str)
+        enriched_context = self._build_context(context)
+
+        # Dedup check
+        is_dup, existing_id = self._dedup.is_duplicate(error_signature)
+        if is_dup and existing_id:
+            self._dedup.record_dedup_hit(existing_id)
+            return None
+
+        # Cascade check
+        cascade_source = self._cascade_detector.check_cascade(
+            self.config.dependencies,
+            self.config.flow_name,
+        )
+
+        report = Report(
+            flow_name=self.config.flow_name,
+            severity=severity,
+            error_type=error_type,
+            error_message=error_message,
+            traceback=traceback_str,
+            logs=captured_logs,
+            context=enriched_context,
+            error_signature=error_signature,
+            cascade_source=cascade_source,
+        )
+
+        # Persist (always)
+        self._store.save_report(report)
+
+        # Send notifications
+        self._send_notifications(report, cascade_source is not None)
+
+        return report.id
+
+    def _build_context(self, user_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Build enriched context with system info and scrubbed env vars."""
+        ctx: Dict[str, Any] = {}
+
+        # System info
+        ctx["python_version"] = platform.python_version()
+        ctx["os"] = f"{platform.system()} {platform.release()}"
+        ctx["flow_name"] = self.config.flow_name
+
+        # Scrubbed environment variables (only a relevant subset)
+        env_subset = {}
+        for key in sorted(os.environ):
+            # Only include a reasonable subset
+            if key.startswith(("AWS_", "FLOW_", "PYTHON", "PATH", "HOME", "USER", "LANG")):
+                env_subset[key] = os.environ[key]
+        ctx["environment"] = self._scrubber.scrub_env_vars(env_subset)
+
+        # User-supplied context
+        if user_context:
+            ctx["user"] = self._scrubber.scrub_dict(user_context)
+
+        return ctx
+
+    def _send_notifications(self, report: Report, is_cascade: bool) -> None:
+        """Send notifications, respecting rate limits."""
+        # Warnings don't trigger alerts by default
+        if report.severity == Severity.WARNING.value:
+            return
+
+        for notifier in self._notifiers:
+            from flow_doctor.notify.slack import SlackNotifier
+            from flow_doctor.notify.email import EmailNotifier
+
+            if isinstance(notifier, SlackNotifier):
+                action_type = ActionType.SLACK_ALERT.value
+            elif isinstance(notifier, EmailNotifier):
+                action_type = ActionType.EMAIL_ALERT.value
+            else:
+                action_type = "unknown_alert"
+
+            # Rate limit check
+            decision = self._rate_limiter.check(action_type)
+            if decision == "degrade":
+                action = Action(
+                    report_id=report.id,
+                    action_type=action_type,
+                    status=ActionStatus.DEGRADED.value,
+                    target="degraded - queued for digest",
+                )
+                self._store.save_action(action)
+                continue
+
+            # Send
+            try:
+                success = notifier.send(report, self.config.flow_name)
+                action = Action(
+                    report_id=report.id,
+                    action_type=action_type,
+                    status=ActionStatus.SENT.value if success else ActionStatus.FAILED.value,
+                )
+                self._store.save_action(action)
+            except Exception as e:
+                print(f"[flow-doctor] Notification error: {e}", file=sys.stderr)
+                action = Action(
+                    report_id=report.id,
+                    action_type=action_type,
+                    status=ActionStatus.FAILED.value,
+                )
+                self._store.save_action(action)
+
+    @contextmanager
+    def guard(self):
+        """Context manager that reports and re-raises any exception.
+
+        Usage:
+            with fd.guard():
+                run_pipeline()
+        """
+        try:
+            yield
+        except Exception as exc:
+            try:
+                self.report(exc)
+            except Exception:
+                pass  # report() already guards itself, but belt-and-suspenders
+            raise
+
+    def monitor(self, func: Optional[Callable] = None, **kwargs: Any) -> Any:
+        """Decorator that reports and re-raises any exception.
+
+        Usage:
+            @fd.monitor
+            def handler(event, context):
+                ...
+
+            # or with arguments:
+            @fd.monitor
+            def my_func():
+                ...
+        """
+        if func is None:
+            # Called with arguments: @fd.monitor(...)
+            def decorator(f: Callable) -> Callable:
+                return self._wrap_monitor(f)
+            return decorator
+
+        # Called without arguments: @fd.monitor
+        return self._wrap_monitor(func)
+
+    def _wrap_monitor(self, func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kw: Any) -> Any:
+            try:
+                return func(*args, **kw)
+            except Exception as exc:
+                try:
+                    self.report(exc)
+                except Exception:
+                    pass
+                raise
+        return wrapper
+
+    @contextmanager
+    def capture_logs(self, level: int = logging.INFO, logger_name: Optional[str] = None):
+        """Context manager that captures log records for attachment to reports.
+
+        Usage:
+            with fd.capture_logs():
+                logger.info("Starting scan...")
+                # ... all logs buffered
+        """
+        handler = _LogCaptureHandler(level)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+
+        target_logger = logging.getLogger(logger_name)
+        target_logger.addHandler(handler)
+
+        prev_handler = self._log_handler
+        self._log_handler = handler
+        try:
+            yield handler
+        finally:
+            target_logger.removeHandler(handler)
+            self._log_handler = prev_handler
+
+    def history(self, limit: int = 10) -> List[Report]:
+        """Get recent reports for this flow."""
+        try:
+            return self._store.get_reports(flow_name=self.config.flow_name, limit=limit)
+        except Exception as e:
+            print(f"[flow-doctor] history() error: {e}", file=sys.stderr)
+            return []
+
+
+def init(
+    config_path: Optional[str] = None,
+    **kwargs: Any,
+) -> FlowDoctor:
+    """Initialize Flow Doctor.
+
+    Args:
+        config_path: Path to a flow-doctor.yaml config file.
+        **kwargs: Inline config overrides (flow_name, repo, owner, notify, store, etc.)
+
+    Returns:
+        A configured FlowDoctor instance.
+    """
+    config = load_config(config_path=config_path, **kwargs)
+    return FlowDoctor(config)

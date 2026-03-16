@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flow-doctor"
+version = "0.1.0"
+description = "Call-site error handler: capture, deduplicate, and alert on pipeline failures."
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "Brian McMahon"}]
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+slack = ["requests>=2.28"]
+email = []
+dev = [
+    "pytest>=7.0",
+    "requests>=2.28",
+]
+
+[tool.setuptools.packages.find]
+include = ["flow_doctor*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
