@@ -8,7 +8,7 @@ from typing import Optional
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-from flow_doctor.core.models import Report
+from flow_doctor.core.models import Diagnosis, Report
 from flow_doctor.notify.base import Notifier
 
 
@@ -19,9 +19,14 @@ class SlackNotifier(Notifier):
         self.webhook_url = webhook_url
         self.channel = channel
 
-    def send(self, report: Report, flow_name: str) -> bool:
+    def send(
+        self,
+        report: Report,
+        flow_name: str,
+        diagnosis: Optional[Diagnosis] = None,
+    ) -> bool:
         try:
-            text = self._format_message(report, flow_name)
+            text = self._format_message(report, flow_name, diagnosis)
             payload = {"text": text}
             if self.channel:
                 payload["channel"] = self.channel
@@ -40,7 +45,11 @@ class SlackNotifier(Notifier):
             return False
 
     @staticmethod
-    def _format_message(report: Report, flow_name: str) -> str:
+    def _format_message(
+        report: Report,
+        flow_name: str,
+        diagnosis: Optional[Diagnosis] = None,
+    ) -> str:
         severity_emoji = {
             "critical": "🔴",
             "error": "🟠",
@@ -66,6 +75,20 @@ class SlackNotifier(Notifier):
             lines.append("```")
             lines.extend(tb_lines)
             lines.append("```")
+
+        # Diagnosis enrichment
+        if diagnosis:
+            category_emoji = {
+                "TRANSIENT": "🔄", "DATA": "📊", "CODE": "🐛",
+                "CONFIG": "⚙️", "EXTERNAL": "🌐", "INFRA": "🏗️",
+            }.get(diagnosis.category, "❓")
+
+            lines.append("")
+            lines.append(f"*Diagnosis:* {category_emoji} {diagnosis.category} (confidence: {diagnosis.confidence:.0%})")
+            lines.append(f"_{diagnosis.root_cause[:300]}_")
+
+            if diagnosis.remediation:
+                lines.append(f"\n*Remediation:* {diagnosis.remediation[:300]}")
 
         lines.append(f"\n_Report ID: {report.id}_")
         return "\n".join(lines)

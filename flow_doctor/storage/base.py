@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import List, Optional
 
-from flow_doctor.core.models import Action, Report
+from flow_doctor.core.models import Action, Diagnosis, FixAttempt, KnownPattern, Report
 
 
 class StorageBackend(ABC):
@@ -51,3 +51,39 @@ class StorageBackend(ABC):
         limit: int = 10,
     ) -> List[Report]:
         """Get recent reports, optionally filtered by flow name."""
+
+    @abstractmethod
+    def get_report(self, report_id: str) -> Optional[Report]:
+        """Get a single report by ID."""
+
+    @abstractmethod
+    def save_diagnosis(self, diagnosis: Diagnosis) -> None:
+        """Persist a diagnosis."""
+
+    @abstractmethod
+    def get_diagnosis_by_report(self, report_id: str) -> Optional[Diagnosis]:
+        """Get the diagnosis for a given report."""
+
+    @abstractmethod
+    def find_known_pattern(self, error_signature: str) -> Optional[KnownPattern]:
+        """Find a known pattern matching this error signature."""
+
+    @abstractmethod
+    def save_known_pattern(self, pattern: KnownPattern) -> None:
+        """Persist a known pattern."""
+
+    @abstractmethod
+    def increment_pattern_hit(self, pattern_id: str) -> None:
+        """Increment hit_count and update last_seen for a known pattern."""
+
+    @abstractmethod
+    def get_degraded_actions(self, since: datetime) -> List[Action]:
+        """Get all degraded actions since the given time."""
+
+    @abstractmethod
+    def save_fix_attempt(self, attempt: FixAttempt) -> None:
+        """Persist a fix attempt."""
+
+    @abstractmethod
+    def get_fix_attempts_for_diagnosis(self, diagnosis_id: str) -> List[FixAttempt]:
+        """Get all fix attempts for a given diagnosis."""

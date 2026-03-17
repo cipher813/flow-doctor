@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from flow_doctor.core.config import FlowDoctorConfig, load_config
 from flow_doctor.core.dedup import DedupChecker, compute_error_signature, compute_signature_from_exception
-from flow_doctor.core.models import Action, ActionStatus, ActionType, Report, Severity
+from flow_doctor.core.models import Action, ActionStatus, ActionType, Diagnosis, Report, Severity
 from flow_doctor.core.rate_limiter import CascadeDetector, RateLimiter
 from flow_doctor.core.scrubber import Scrubber
 from flow_doctor.notify.base import Notifier
@@ -41,12 +41,41 @@ class FlowDoctor:
     def __init__(self, config: FlowDoctorConfig):
         self.config = config
         self._scrubber = Scrubber()
-        self._store = self._init_store(config)
-        self._notifiers = self._init_notifiers(config)
-        self._dedup = DedupChecker(self._store, config.dedup_cooldown_minutes)
-        self._rate_limiter = RateLimiter(self._store, config.rate_limits)
-        self._cascade_detector = CascadeDetector(self._store)
+        self._store: Optional[StorageBackend] = None
+        self._notifiers: List[Notifier] = []
+        self._dedup: Optional[DedupChecker] = None
+        self._rate_limiter: Optional[RateLimiter] = None
+        self._cascade_detector: Optional[CascadeDetector] = None
         self._log_handler: Optional[_LogCaptureHandler] = None
+        self._diagnosis_provider = None
+        self._knowledge_base = None
+        self._context_assembler = None
+        self._digest_generator = None
+        self._healthy = False
+
+        try:
+            self._store = self._init_store(config)
+            self._notifiers = self._init_notifiers(config)
+            self._dedup = DedupChecker(self._store, config.dedup_cooldown_minutes)
+            self._rate_limiter = RateLimiter(self._store, config.rate_limits)
+            self._cascade_detector = CascadeDetector(self._store)
+
+            # Phase 2: diagnosis components
+            self._init_diagnosis(config)
+
+            # Daily digest
+            from flow_doctor.digest.generator import DigestGenerator
+            self._digest_generator = DigestGenerator(self._store)
+
+            self._healthy = True
+        except Exception:
+            import sys
+            print(
+                f"[flow-doctor] WARNING: initialization failed, operating in degraded mode",
+                file=sys.stderr,
+            )
+            import traceback as _tb
+            _tb.print_exc(file=sys.stderr)
 
     @staticmethod
     def _init_store(config: FlowDoctorConfig) -> StorageBackend:
@@ -73,7 +102,41 @@ class FlowDoctor:
                     smtp_port=nc.smtp_port,
                     smtp_password=nc.smtp_password,
                 ))
+            elif nc.type == "github":
+                repo = nc.repo or config.repo
+                token = nc.token or (config.github.token if config.github else None)
+                if repo and token:
+                    from flow_doctor.notify.github import GitHubNotifier
+                    labels = nc.labels or (config.github.labels if config.github else ["flow-doctor"])
+                    notifiers.append(GitHubNotifier(repo=repo, token=token, labels=labels))
         return notifiers
+
+    def _init_diagnosis(self, config: FlowDoctorConfig) -> None:
+        """Initialize Phase 2 diagnosis components."""
+        from flow_doctor.diagnosis.context import ContextAssembler
+        from flow_doctor.diagnosis.knowledge_base import KnowledgeBase
+
+        self._knowledge_base = KnowledgeBase(self._store)
+        self._context_assembler = ContextAssembler(
+            repo=config.repo,
+            dependencies=config.dependencies,
+        )
+
+        if config.diagnosis.enabled and config.diagnosis.api_key:
+            try:
+                from flow_doctor.diagnosis.provider import AnthropicProvider
+                self._diagnosis_provider = AnthropicProvider(
+                    api_key=config.diagnosis.api_key,
+                    model=config.diagnosis.model,
+                    confidence_calibration=config.diagnosis.confidence_calibration,
+                    timeout_seconds=config.diagnosis.timeout_seconds,
+                )
+            except ImportError:
+                print(
+                    "[flow-doctor] WARNING: anthropic package not installed, diagnosis disabled. "
+                    "Install with: pip install flow-doctor[diagnosis]",
+                    file=sys.stderr,
+                )
 
     def report(
         self,
@@ -182,8 +245,11 @@ class FlowDoctor:
         # Persist (always)
         self._store.save_report(report)
 
-        # Send notifications
-        self._send_notifications(report, cascade_source is not None)
+        # Phase 2: Diagnosis
+        diagnosis = self._run_diagnosis(report, cascade_source)
+
+        # Send notifications (enriched with diagnosis if available)
+        self._send_notifications(report, cascade_source is not None, diagnosis)
 
         return report.id
 
@@ -210,7 +276,94 @@ class FlowDoctor:
 
         return ctx
 
-    def _send_notifications(self, report: Report, is_cascade: bool) -> None:
+    def _run_diagnosis(
+        self,
+        report: Report,
+        cascade_source: Optional[str],
+    ) -> Optional[Diagnosis]:
+        """Run Phase 2 diagnosis pipeline. Returns Diagnosis or None."""
+        # Skip diagnosis for warnings and cascades
+        if report.severity == Severity.WARNING.value:
+            return None
+        if cascade_source:
+            return None
+        if not self._knowledge_base:
+            return None
+
+        try:
+            # 1. Check knowledge base first (free, no LLM call)
+            kb_diagnosis = self._knowledge_base.lookup(
+                report.error_signature, report.id, report.flow_name
+            )
+            if kb_diagnosis:
+                self._store.save_diagnosis(kb_diagnosis)
+                return kb_diagnosis
+
+            # 2. Rate limit check for LLM diagnosis
+            if not self._diagnosis_provider or not self._rate_limiter:
+                return None
+            decision = self._rate_limiter.check("diagnosis")
+            if decision == "degrade":
+                # Log the degraded diagnosis action
+                action = Action(
+                    report_id=report.id,
+                    action_type="diagnosis",
+                    status=ActionStatus.DEGRADED.value,
+                    target="degraded - diagnosis rate limited",
+                )
+                self._store.save_action(action)
+                return None
+
+            # 3. Assemble context and call LLM
+            git_context = self._load_git_context()
+            context = self._context_assembler.assemble(
+                report=report,
+                git_context=git_context,
+            )
+            diagnosis = self._diagnosis_provider.diagnose(context, self._context_assembler)
+            diagnosis.report_id = report.id
+
+            # 4. Save diagnosis and record the action
+            self._store.save_diagnosis(diagnosis)
+            action = Action(
+                report_id=report.id,
+                action_type="diagnosis",
+                status=ActionStatus.SENT.value,
+                diagnosis_id=diagnosis.id,
+            )
+            self._store.save_action(action)
+
+            return diagnosis
+
+        except Exception as e:
+            print(f"[flow-doctor] Diagnosis failed: {e}", file=sys.stderr)
+            return None
+
+    def _load_git_context(self) -> Optional[dict]:
+        """Load git context for diagnosis, preferring local over GitHub API."""
+        try:
+            from flow_doctor.diagnosis.git_context import GitContextLoader
+
+            # Try local git first
+            ctx = GitContextLoader.load_local()
+            if ctx:
+                return ctx
+
+            # Fall back to GitHub API if repo and token are configured
+            if self.config.repo and self.config.github and self.config.github.token:
+                return GitContextLoader.load_github(
+                    self.config.repo, self.config.github.token
+                )
+        except Exception:
+            pass
+        return None
+
+    def _send_notifications(
+        self,
+        report: Report,
+        is_cascade: bool,
+        diagnosis: Optional[Diagnosis] = None,
+    ) -> None:
         """Send notifications, respecting rate limits."""
         # Warnings don't trigger alerts by default
         if report.severity == Severity.WARNING.value:
@@ -219,11 +372,14 @@ class FlowDoctor:
         for notifier in self._notifiers:
             from flow_doctor.notify.slack import SlackNotifier
             from flow_doctor.notify.email import EmailNotifier
+            from flow_doctor.notify.github import GitHubNotifier
 
             if isinstance(notifier, SlackNotifier):
                 action_type = ActionType.SLACK_ALERT.value
             elif isinstance(notifier, EmailNotifier):
                 action_type = ActionType.EMAIL_ALERT.value
+            elif isinstance(notifier, GitHubNotifier):
+                action_type = ActionType.GITHUB_ISSUE.value
             else:
                 action_type = "unknown_alert"
 
@@ -235,17 +391,19 @@ class FlowDoctor:
                     action_type=action_type,
                     status=ActionStatus.DEGRADED.value,
                     target="degraded - queued for digest",
+                    diagnosis_id=diagnosis.id if diagnosis else None,
                 )
                 self._store.save_action(action)
                 continue
 
             # Send
             try:
-                success = notifier.send(report, self.config.flow_name)
+                success = notifier.send(report, self.config.flow_name, diagnosis)
                 action = Action(
                     report_id=report.id,
                     action_type=action_type,
                     status=ActionStatus.SENT.value if success else ActionStatus.FAILED.value,
+                    diagnosis_id=diagnosis.id if diagnosis else None,
                 )
                 self._store.save_action(action)
             except Exception as e:
@@ -254,6 +412,7 @@ class FlowDoctor:
                     report_id=report.id,
                     action_type=action_type,
                     status=ActionStatus.FAILED.value,
+                    diagnosis_id=diagnosis.id if diagnosis else None,
                 )
                 self._store.save_action(action)
 
@@ -339,6 +498,28 @@ class FlowDoctor:
         except Exception as e:
             print(f"[flow-doctor] history() error: {e}", file=sys.stderr)
             return []
+
+    def digest(self, since: Optional[datetime] = None) -> Optional[str]:
+        """Generate and optionally send the daily digest.
+
+        Args:
+            since: Cutoff time. Defaults to 24 hours ago.
+
+        Returns:
+            The digest content string, or None if nothing to report.
+        """
+        try:
+            if not self._digest_generator:
+                return None
+            content = self._digest_generator.generate(since)
+            if content and self._notifiers:
+                self._digest_generator.send(
+                    self._notifiers, self.config.flow_name, since
+                )
+            return content
+        except Exception as e:
+            print(f"[flow-doctor] digest() error: {e}", file=sys.stderr)
+            return None
 
 
 def init(

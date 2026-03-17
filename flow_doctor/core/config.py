@@ -13,7 +13,7 @@ import yaml
 
 @dataclass
 class NotifyChannelConfig:
-    type: str  # "slack" or "email"
+    type: str  # "slack", "email", or "github"
     # Slack fields
     webhook_url: Optional[str] = None
     channel: Optional[str] = None
@@ -23,6 +23,10 @@ class NotifyChannelConfig:
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 587
     smtp_password: Optional[str] = None
+    # GitHub fields
+    repo: Optional[str] = None
+    token: Optional[str] = None
+    labels: Optional[List[str]] = None
 
 
 @dataclass
@@ -44,6 +48,38 @@ class RateLimitConfig:
 
 
 @dataclass
+class DiagnosisConfig:
+    enabled: bool = False
+    provider: str = "anthropic"
+    model: str = "claude-sonnet-4-6-20250514"
+    api_key: Optional[str] = None
+    confidence_calibration: float = 0.85
+    timeout_seconds: int = 30
+
+
+@dataclass
+class GitHubConfig:
+    token: Optional[str] = None
+    labels: List[str] = field(default_factory=lambda: ["flow-doctor"])
+
+
+@dataclass
+class ScopeConfig:
+    allow: List[str] = field(default_factory=list)
+    deny: List[str] = field(default_factory=list)
+
+
+@dataclass
+class AutoFixConfig:
+    enabled: bool = False
+    confidence_threshold: float = 0.90
+    scope: ScopeConfig = field(default_factory=ScopeConfig)
+    test_command: str = "python -m pytest tests/ -x -q"
+    dry_run: bool = True
+    model: Optional[str] = None
+
+
+@dataclass
 class FlowDoctorConfig:
     flow_name: str = "default"
     repo: Optional[str] = None
@@ -53,7 +89,9 @@ class FlowDoctorConfig:
     rate_limits: RateLimitConfig = field(default_factory=RateLimitConfig)
     dependencies: List[str] = field(default_factory=list)
     dedup_cooldown_minutes: int = 60
-    # Phase 2+ placeholders in config are ignored
+    diagnosis: DiagnosisConfig = field(default_factory=DiagnosisConfig)
+    github: GitHubConfig = field(default_factory=GitHubConfig)
+    auto_fix: AutoFixConfig = field(default_factory=AutoFixConfig)
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -99,6 +137,13 @@ def _parse_notify_shorthand(items: List[str]) -> List[NotifyChannelConfig]:
                 smtp_host="smtp.gmail.com",
                 smtp_password=os.environ.get("GMAIL_APP_PASSWORD"),
             ))
+        elif item.startswith("github:"):
+            repo = item[len("github:"):]
+            configs.append(NotifyChannelConfig(
+                type="github",
+                repo=repo,
+                token=os.environ.get("GITHUB_TOKEN"),
+            ))
         else:
             configs.append(NotifyChannelConfig(type=item))
     return configs
@@ -118,6 +163,9 @@ def _parse_notify_dicts(items: List[Dict]) -> List[NotifyChannelConfig]:
             smtp_host=item.get("smtp_host", "smtp.gmail.com"),
             smtp_port=item.get("smtp_port", 587),
             smtp_password=item.get("smtp_password"),
+            repo=item.get("repo"),
+            token=item.get("token"),
+            labels=item.get("labels"),
         ))
     return configs
 
@@ -193,6 +241,52 @@ def load_config(
 
     dedup_cooldown = raw.get("dedup_cooldown_minutes", rate_limits.dedup_cooldown_minutes)
 
+    # Parse diagnosis config
+    diag_raw = raw.get("diagnosis", {})
+    if isinstance(diag_raw, dict):
+        diag_raw = _resolve_dict(diag_raw)
+        diagnosis_config = DiagnosisConfig(
+            enabled=diag_raw.get("enabled", False),
+            provider=diag_raw.get("provider", "anthropic"),
+            model=diag_raw.get("model", "claude-sonnet-4-6-20250514"),
+            api_key=diag_raw.get("api_key"),
+            confidence_calibration=float(diag_raw.get("confidence_calibration", 0.85)),
+            timeout_seconds=int(diag_raw.get("timeout_seconds", 30)),
+        )
+    else:
+        diagnosis_config = DiagnosisConfig()
+
+    # Parse github config
+    gh_raw = raw.get("github", {})
+    if isinstance(gh_raw, dict):
+        gh_raw = _resolve_dict(gh_raw)
+        github_config = GitHubConfig(
+            token=gh_raw.get("token"),
+            labels=gh_raw.get("labels", ["flow-doctor"]),
+        )
+    else:
+        github_config = GitHubConfig()
+
+    # Parse auto_fix config
+    af_raw = raw.get("auto_fix", {})
+    if isinstance(af_raw, dict):
+        af_raw = _resolve_dict(af_raw)
+        scope_raw = af_raw.get("scope", {})
+        scope_config = ScopeConfig(
+            allow=scope_raw.get("allow", []),
+            deny=scope_raw.get("deny", []),
+        )
+        auto_fix_config = AutoFixConfig(
+            enabled=af_raw.get("enabled", False),
+            confidence_threshold=float(af_raw.get("confidence_threshold", 0.90)),
+            scope=scope_config,
+            test_command=af_raw.get("test_command", "python -m pytest tests/ -x -q"),
+            dry_run=af_raw.get("dry_run", True),
+            model=af_raw.get("model"),
+        )
+    else:
+        auto_fix_config = AutoFixConfig()
+
     return FlowDoctorConfig(
         flow_name=raw.get("flow_name", "default"),
         repo=raw.get("repo"),
@@ -202,4 +296,7 @@ def load_config(
         rate_limits=rate_limits,
         dependencies=raw.get("dependencies", []),
         dedup_cooldown_minutes=dedup_cooldown,
+        diagnosis=diagnosis_config,
+        github=github_config,
+        auto_fix=auto_fix_config,
     )

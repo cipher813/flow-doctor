@@ -8,7 +8,7 @@ import threading
 from datetime import datetime, date
 from typing import List, Optional
 
-from flow_doctor.core.models import Action, Report
+from flow_doctor.core.models import Action, Diagnosis, FixAttempt, KnownPattern, Report
 from flow_doctor.storage.base import StorageBackend
 
 _SCHEMA_SQL = """
@@ -222,6 +222,203 @@ class SQLiteStorage(StorageBackend):
                 (limit,),
             ).fetchall()
         return [self._row_to_report(r) for r in rows]
+
+    def get_report(self, report_id: str) -> Optional[Report]:
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT * FROM reports WHERE id = ?", (report_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_report(row)
+
+    def save_diagnosis(self, diagnosis: Diagnosis) -> None:
+        conn = self._conn()
+        conn.execute(
+            """INSERT INTO diagnoses
+               (id, report_id, flow_name, category, root_cause, affected_files,
+                confidence, remediation, auto_fixable, reasoning,
+                alternative_hypotheses, source, llm_model, tokens_used, cost_usd,
+                created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                diagnosis.id,
+                diagnosis.report_id,
+                diagnosis.flow_name,
+                diagnosis.category,
+                diagnosis.root_cause,
+                json.dumps(diagnosis.affected_files) if diagnosis.affected_files else None,
+                diagnosis.confidence,
+                diagnosis.remediation,
+                1 if diagnosis.auto_fixable else 0 if diagnosis.auto_fixable is not None else None,
+                diagnosis.reasoning,
+                json.dumps(diagnosis.alternative_hypotheses) if diagnosis.alternative_hypotheses else None,
+                diagnosis.source,
+                diagnosis.llm_model,
+                diagnosis.tokens_used,
+                diagnosis.cost_usd,
+                diagnosis.created_at.isoformat(),
+            ),
+        )
+        conn.commit()
+
+    def get_diagnosis_by_report(self, report_id: str) -> Optional[Diagnosis]:
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT * FROM diagnoses WHERE report_id = ? ORDER BY created_at DESC LIMIT 1",
+            (report_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_diagnosis(row)
+
+    def find_known_pattern(self, error_signature: str) -> Optional[KnownPattern]:
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT * FROM known_patterns WHERE error_signature = ? LIMIT 1",
+            (error_signature,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_known_pattern(row)
+
+    def save_known_pattern(self, pattern: KnownPattern) -> None:
+        conn = self._conn()
+        conn.execute(
+            """INSERT INTO known_patterns
+               (id, flow_name, error_signature, category, root_cause, resolution,
+                auto_fixable, hit_count, last_seen, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                pattern.id,
+                pattern.flow_name,
+                pattern.error_signature,
+                pattern.category,
+                pattern.root_cause,
+                pattern.resolution,
+                1 if pattern.auto_fixable else 0,
+                pattern.hit_count,
+                pattern.last_seen.isoformat() if pattern.last_seen else None,
+                pattern.created_at.isoformat(),
+            ),
+        )
+        conn.commit()
+
+    def increment_pattern_hit(self, pattern_id: str) -> None:
+        conn = self._conn()
+        conn.execute(
+            "UPDATE known_patterns SET hit_count = hit_count + 1, last_seen = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(), pattern_id),
+        )
+        conn.commit()
+
+    def get_degraded_actions(self, since: datetime) -> List[Action]:
+        conn = self._conn()
+        rows = conn.execute(
+            """SELECT * FROM actions
+               WHERE status = 'degraded' AND created_at >= ?
+               ORDER BY created_at DESC""",
+            (since.isoformat(),),
+        ).fetchall()
+        return [self._row_to_action(r) for r in rows]
+
+    def save_fix_attempt(self, attempt: FixAttempt) -> None:
+        conn = self._conn()
+        conn.execute(
+            """INSERT INTO fix_attempts
+               (id, diagnosis_id, diff, test_passed, test_output, pr_url,
+                pr_status, rejection_reason, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                attempt.id,
+                attempt.diagnosis_id,
+                attempt.diff,
+                1 if attempt.test_passed else 0 if attempt.test_passed is not None else None,
+                attempt.test_output,
+                attempt.pr_url,
+                attempt.pr_status,
+                attempt.rejection_reason,
+                attempt.created_at.isoformat(),
+            ),
+        )
+        conn.commit()
+
+    def get_fix_attempts_for_diagnosis(self, diagnosis_id: str) -> List[FixAttempt]:
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT * FROM fix_attempts WHERE diagnosis_id = ? ORDER BY created_at DESC",
+            (diagnosis_id,),
+        ).fetchall()
+        return [self._row_to_fix_attempt(r) for r in rows]
+
+    @staticmethod
+    def _row_to_diagnosis(row: sqlite3.Row) -> Diagnosis:
+        affected = row["affected_files"]
+        alt = row["alternative_hypotheses"]
+        auto_fix = row["auto_fixable"]
+        return Diagnosis(
+            id=row["id"],
+            report_id=row["report_id"],
+            flow_name=row["flow_name"],
+            category=row["category"],
+            root_cause=row["root_cause"],
+            affected_files=json.loads(affected) if affected else None,
+            confidence=row["confidence"],
+            remediation=row["remediation"],
+            auto_fixable=bool(auto_fix) if auto_fix is not None else None,
+            reasoning=row["reasoning"],
+            alternative_hypotheses=json.loads(alt) if alt else None,
+            source=row["source"],
+            llm_model=row["llm_model"],
+            tokens_used=row["tokens_used"],
+            cost_usd=row["cost_usd"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    @staticmethod
+    def _row_to_known_pattern(row: sqlite3.Row) -> KnownPattern:
+        last_seen = row["last_seen"]
+        return KnownPattern(
+            id=row["id"],
+            flow_name=row["flow_name"],
+            error_signature=row["error_signature"],
+            category=row["category"],
+            root_cause=row["root_cause"],
+            resolution=row["resolution"],
+            auto_fixable=bool(row["auto_fixable"]),
+            hit_count=row["hit_count"],
+            last_seen=datetime.fromisoformat(last_seen) if last_seen else None,
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    @staticmethod
+    def _row_to_action(row: sqlite3.Row) -> Action:
+        metadata = row["metadata"]
+        return Action(
+            id=row["id"],
+            report_id=row["report_id"],
+            action_type=row["action_type"],
+            status=row["status"],
+            diagnosis_id=row["diagnosis_id"],
+            target=row["target"],
+            metadata=json.loads(metadata) if metadata else None,
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    @staticmethod
+    def _row_to_fix_attempt(row: sqlite3.Row) -> FixAttempt:
+        test_passed = row["test_passed"]
+        return FixAttempt(
+            id=row["id"],
+            diagnosis_id=row["diagnosis_id"],
+            diff=row["diff"],
+            test_passed=bool(test_passed) if test_passed is not None else None,
+            test_output=row["test_output"],
+            pr_url=row["pr_url"],
+            pr_status=row["pr_status"],
+            rejection_reason=row["rejection_reason"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
 
     @staticmethod
     def _row_to_report(row: sqlite3.Row) -> Report:
