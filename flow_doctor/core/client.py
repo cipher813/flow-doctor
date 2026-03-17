@@ -491,6 +491,26 @@ class FlowDoctor:
             target_logger.removeHandler(handler)
             self._log_handler = prev_handler
 
+    def get_handler(self, level: int = logging.ERROR, **kwargs: Any) -> "FlowDoctorHandler":
+        """Return a logging.Handler that reports ERROR+ records via Flow Doctor.
+
+        Merges defaults from config.handler if present. kwargs override everything.
+        """
+        from flow_doctor.core.handler import FlowDoctorHandler
+
+        handler_kwargs: Dict[str, Any] = {}
+        if self.config.handler:
+            handler_kwargs["level"] = getattr(logging, self.config.handler.level, logging.ERROR)
+            handler_kwargs["include_patterns"] = self.config.handler.include_patterns
+            handler_kwargs["exclude_patterns"] = self.config.handler.exclude_patterns
+            handler_kwargs["queue_size"] = self.config.handler.queue_size
+
+        # Explicit level arg overrides config
+        handler_kwargs["level"] = level
+        handler_kwargs.update(kwargs)
+
+        return FlowDoctorHandler(self, **handler_kwargs)
+
     def history(self, limit: int = 10) -> List[Report]:
         """Get recent reports for this flow."""
         try:

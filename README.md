@@ -25,6 +25,7 @@ Flow Doctor captures the error, deduplicates it, runs LLM diagnosis, files a Git
 - **LLM diagnosis** — structured root cause analysis via Claude (category, confidence, affected files, remediation)
 - **GitHub issues** — auto-filed with diagnosis, traceback, and machine-readable metadata
 - **Auto-fix PRs** — human-in-the-loop: add a `flow-doctor:fix` label to an issue, and a GitHub Actions workflow generates a validated fix PR
+- **Logging handler** — `FlowDoctorHandler` integrates with Python's `logging` module for zero-change-at-call-site adoption
 - **Notifications** — Slack, email, and GitHub issue backends
 - **Daily digest** — summarizes suppressed errors at end of day
 
@@ -145,6 +146,57 @@ with fd.capture_logs(level=logging.INFO):
     run_pipeline()
     # All logs are attached to the next report
 ```
+
+### Logging handler
+
+Automatically route `logger.error()` and `logger.exception()` calls through Flow Doctor's full pipeline — no `fd.report()` calls needed at each site:
+
+```python
+import logging
+
+fd = flow_doctor.init(config_path="flow-doctor.yaml")
+
+# Attach to any logger
+handler = fd.get_handler(level=logging.ERROR)
+logging.getLogger().addHandler(handler)
+
+# Now any ERROR+ log triggers dedup, diagnosis, and notifications
+logger = logging.getLogger("my_pipeline")
+logger.error("Scanner returned 0 candidates")  # → Flow Doctor report
+
+try:
+    run_pipeline()
+except Exception:
+    logger.exception("Pipeline failed")  # → report with full exception info
+```
+
+You can also construct the handler directly for more control:
+
+```python
+from flow_doctor import FlowDoctorHandler
+
+handler = FlowDoctorHandler(
+    fd,
+    level=logging.ERROR,
+    exclude_patterns=[r"^Connection reset"],  # skip noisy errors
+    include_patterns=[r"CRITICAL"],           # allowlist (if set, only matching pass)
+    queue_size=200,
+)
+```
+
+The handler is **non-blocking** — `emit()` enqueues work and returns immediately. A background daemon thread calls `fd.report()` asynchronously. If the queue fills up, messages are dropped silently rather than blocking the caller.
+
+Configure defaults via YAML:
+
+```yaml
+handler:
+  level: ERROR
+  exclude_patterns:
+    - "^Connection reset"
+  queue_size: 100
+```
+
+Call `handler.shutdown()` or `handler.close()` at process exit for graceful drain.
 
 ### History and digest
 

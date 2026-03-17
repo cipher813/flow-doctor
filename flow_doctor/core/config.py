@@ -80,6 +80,14 @@ class AutoFixConfig:
 
 
 @dataclass
+class HandlerConfig:
+    level: str = "ERROR"
+    include_patterns: List[str] = field(default_factory=list)
+    exclude_patterns: List[str] = field(default_factory=list)
+    queue_size: int = 100
+
+
+@dataclass
 class FlowDoctorConfig:
     flow_name: str = "default"
     repo: Optional[str] = None
@@ -92,6 +100,7 @@ class FlowDoctorConfig:
     diagnosis: DiagnosisConfig = field(default_factory=DiagnosisConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
     auto_fix: AutoFixConfig = field(default_factory=AutoFixConfig)
+    handler: Optional[HandlerConfig] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -287,6 +296,19 @@ def load_config(
     else:
         auto_fix_config = AutoFixConfig()
 
+    # Parse handler config
+    handler_raw = raw.get("handler")
+    if isinstance(handler_raw, dict):
+        handler_raw = _resolve_dict(handler_raw)
+        handler_config = HandlerConfig(
+            level=handler_raw.get("level", "ERROR"),
+            include_patterns=handler_raw.get("include_patterns", []),
+            exclude_patterns=handler_raw.get("exclude_patterns", []),
+            queue_size=int(handler_raw.get("queue_size", 100)),
+        )
+    else:
+        handler_config = None
+
     return FlowDoctorConfig(
         flow_name=raw.get("flow_name", "default"),
         repo=raw.get("repo"),
@@ -299,4 +321,5 @@ def load_config(
         diagnosis=diagnosis_config,
         github=github_config,
         auto_fix=auto_fix_config,
+        handler=handler_config,
     )
