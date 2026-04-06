@@ -55,6 +55,7 @@ class DiagnosisConfig:
     api_key: Optional[str] = None
     confidence_calibration: float = 0.85
     timeout_seconds: int = 30
+    max_daily_cost_usd: float = 1.00  # Hard cap on daily LLM spend
 
 
 @dataclass
@@ -80,6 +81,20 @@ class AutoFixConfig:
 
 
 @dataclass
+class RemediationConfig:
+    enabled: bool = False
+    dry_run: bool = True  # Log actions without executing
+    auto_remediate_min_confidence: float = 0.9
+    fix_pr_min_confidence: float = 0.8
+    max_auto_remediations_per_day: int = 5
+    max_auto_remediations_per_failure: int = 2
+    market_hours_lockout: bool = True
+    telegram_webhook_url: Optional[str] = None
+    s3_audit_bucket: Optional[str] = None
+    s3_audit_prefix: str = "flow-doctor/audit"
+
+
+@dataclass
 class HandlerConfig:
     level: str = "ERROR"
     include_patterns: List[str] = field(default_factory=list)
@@ -100,6 +115,7 @@ class FlowDoctorConfig:
     diagnosis: DiagnosisConfig = field(default_factory=DiagnosisConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
     auto_fix: AutoFixConfig = field(default_factory=AutoFixConfig)
+    remediation: RemediationConfig = field(default_factory=RemediationConfig)
     handler: Optional[HandlerConfig] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -261,6 +277,7 @@ def load_config(
             api_key=diag_raw.get("api_key"),
             confidence_calibration=float(diag_raw.get("confidence_calibration", 0.85)),
             timeout_seconds=int(diag_raw.get("timeout_seconds", 30)),
+            max_daily_cost_usd=float(diag_raw.get("max_daily_cost_usd", 1.00)),
         )
     else:
         diagnosis_config = DiagnosisConfig()
@@ -296,6 +313,25 @@ def load_config(
     else:
         auto_fix_config = AutoFixConfig()
 
+    # Parse remediation config
+    rem_raw = raw.get("remediation", {})
+    if isinstance(rem_raw, dict):
+        rem_raw = _resolve_dict(rem_raw)
+        remediation_config = RemediationConfig(
+            enabled=rem_raw.get("enabled", False),
+            dry_run=rem_raw.get("dry_run", True),
+            auto_remediate_min_confidence=float(rem_raw.get("auto_remediate_min_confidence", 0.9)),
+            fix_pr_min_confidence=float(rem_raw.get("fix_pr_min_confidence", 0.8)),
+            max_auto_remediations_per_day=int(rem_raw.get("max_auto_remediations_per_day", 5)),
+            max_auto_remediations_per_failure=int(rem_raw.get("max_auto_remediations_per_failure", 2)),
+            market_hours_lockout=rem_raw.get("market_hours_lockout", True),
+            telegram_webhook_url=rem_raw.get("telegram_webhook_url"),
+            s3_audit_bucket=rem_raw.get("s3_audit_bucket"),
+            s3_audit_prefix=rem_raw.get("s3_audit_prefix", "flow-doctor/audit"),
+        )
+    else:
+        remediation_config = RemediationConfig()
+
     # Parse handler config
     handler_raw = raw.get("handler")
     if isinstance(handler_raw, dict):
@@ -321,5 +357,6 @@ def load_config(
         diagnosis=diagnosis_config,
         github=github_config,
         auto_fix=auto_fix_config,
+        remediation=remediation_config,
         handler=handler_config,
     )

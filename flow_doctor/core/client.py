@@ -51,6 +51,8 @@ class FlowDoctor:
         self._knowledge_base = None
         self._context_assembler = None
         self._digest_generator = None
+        self._decision_gate = None
+        self._remediation_executor = None
         self._healthy = False
 
         try:
@@ -62,6 +64,9 @@ class FlowDoctor:
 
             # Phase 2: diagnosis components
             self._init_diagnosis(config)
+
+            # Phase 3: remediation (decision gate + executor)
+            self._init_remediation(config)
 
             # Daily digest
             from flow_doctor.digest.generator import DigestGenerator
@@ -137,6 +142,34 @@ class FlowDoctor:
                     "Install with: pip install flow-doctor[diagnosis]",
                     file=sys.stderr,
                 )
+
+    def _init_remediation(self, config: FlowDoctorConfig) -> None:
+        """Initialize Phase 3 remediation components."""
+        if not config.remediation.enabled:
+            return
+
+        try:
+            from flow_doctor.remediation.decision_gate import DecisionGate, GateConfig
+            from flow_doctor.remediation.executor import RemediationExecutor
+
+            gate_config = GateConfig(
+                auto_remediate_min_confidence=config.remediation.auto_remediate_min_confidence,
+                fix_pr_min_confidence=config.remediation.fix_pr_min_confidence,
+                max_auto_remediations_per_day=config.remediation.max_auto_remediations_per_day,
+                max_auto_remediations_per_failure=config.remediation.max_auto_remediations_per_failure,
+            )
+            if not config.remediation.market_hours_lockout:
+                gate_config.market_open_hour = 0
+                gate_config.market_close_hour = 0
+
+            self._decision_gate = DecisionGate(config=gate_config, store=self._store)
+            self._remediation_executor = RemediationExecutor(
+                dry_run=config.remediation.dry_run,
+                store=self._store,
+                telegram_webhook_url=config.remediation.telegram_webhook_url,
+            )
+        except Exception as e:
+            print(f"[flow-doctor] Remediation init failed: {e}", file=sys.stderr)
 
     def report(
         self,
@@ -251,6 +284,10 @@ class FlowDoctor:
         # Send notifications (enriched with diagnosis if available)
         self._send_notifications(report, cascade_source is not None, diagnosis)
 
+        # Phase 3: Decision gate + remediation
+        if diagnosis and self._decision_gate:
+            self._run_remediation(report, diagnosis)
+
         return report.id
 
     def _build_context(self, user_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -314,6 +351,20 @@ class FlowDoctor:
                 self._store.save_action(action)
                 return None
 
+            # 2b. Daily cost cap check
+            max_cost = self.config.diagnosis.max_daily_cost_usd
+            if max_cost > 0:
+                daily_cost = self._store.get_daily_diagnosis_cost()
+                if daily_cost >= max_cost:
+                    action = Action(
+                        report_id=report.id,
+                        action_type="diagnosis",
+                        status=ActionStatus.DEGRADED.value,
+                        target=f"degraded - daily cost cap ${max_cost:.2f} reached (spent ${daily_cost:.2f})",
+                    )
+                    self._store.save_action(action)
+                    return None
+
             # 3. Assemble context and call LLM
             git_context = self._load_git_context()
             context = self._context_assembler.assemble(
@@ -357,6 +408,46 @@ class FlowDoctor:
         except Exception:
             pass
         return None
+
+    def _run_remediation(self, report: Report, diagnosis: Diagnosis) -> None:
+        """Run the decision gate and execute remediation if appropriate."""
+        try:
+            decision = self._decision_gate.decide(
+                diagnosis=diagnosis,
+                error_type=report.error_type,
+                error_message=report.error_message,
+                flow_name=report.flow_name,
+            )
+
+            if decision.decision_type.value == "auto_remediate" and self._remediation_executor:
+                result = self._remediation_executor.execute(decision)
+                if not result.success and not result.dry_run:
+                    print(
+                        f"[flow-doctor] Remediation failed: {result.error}",
+                        file=sys.stderr,
+                    )
+            elif decision.decision_type.value == "generate_fix_pr":
+                # PR generation is handled separately (Phase 4)
+                # Log the decision for now
+                if self._store:
+                    self._store.save_remediation_action(
+                        report_id=report.id,
+                        diagnosis_id=diagnosis.id,
+                        decision_type="generate_fix_pr",
+                        playbook_pattern=decision.playbook_match.name if decision.playbook_match else None,
+                    )
+            elif decision.decision_type.value == "escalate":
+                if self._store:
+                    self._store.save_remediation_action(
+                        report_id=report.id,
+                        diagnosis_id=diagnosis.id,
+                        decision_type="escalate",
+                        playbook_pattern=decision.playbook_match.name if decision.playbook_match else None,
+                        output=decision.reason,
+                    )
+
+        except Exception as e:
+            print(f"[flow-doctor] Remediation pipeline error: {e}", file=sys.stderr)
 
     def _send_notifications(
         self,
