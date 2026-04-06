@@ -9,10 +9,12 @@ import sqlite3
 import tempfile
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, PropertyMock
 
 import flow_doctor
 from flow_doctor.core.models import Diagnosis
+from flow_doctor.diagnosis.context import ContextAssembler, DiagnosisContext
+from flow_doctor.diagnosis.provider import DiagnosisProvider
 from flow_doctor.remediation.decision_gate import DecisionType
 from flow_doctor.remediation.executor import ExecutionResult, RemediationExecutor
 from flow_doctor.remediation.playbook import Playbook, RemediationType
@@ -259,3 +261,194 @@ class TestFullPipeline:
                 f"Failed for '{err_msg[:40]}': expected {expected}, got {decision.decision_type} "
                 f"(reason: {decision.reason})"
             )
+
+
+# ── End-to-End: report() → diagnose → decide → remediate ────────────────────
+
+
+class _FakeProvider(DiagnosisProvider):
+    """Diagnosis provider that returns a pre-configured Diagnosis."""
+
+    def __init__(self, category: str, root_cause: str, confidence: float):
+        self._category = category
+        self._root_cause = root_cause
+        self._confidence = confidence
+
+    def diagnose(self, context: DiagnosisContext, assembler: ContextAssembler) -> Diagnosis:
+        return Diagnosis(
+            report_id="",  # set by caller
+            flow_name=context.flow_name,
+            category=self._category,
+            root_cause=self._root_cause,
+            confidence=self._confidence,
+            remediation="Restart the service",
+            auto_fixable=True,
+            source="fake",
+            tokens_used=100,
+            cost_usd=0.001,
+        )
+
+
+class TestEndToEnd:
+    """Full report() → diagnose → decide → remediate with mocked LLM."""
+
+    def _make_fd_with_diagnosis(self, tmp_path, category, root_cause, confidence):
+        """Create a FlowDoctor with a fake diagnosis provider and remediation enabled."""
+        db_path = str(tmp_path / "e2e_test.db")
+
+        fd = flow_doctor.init(
+            flow_name="executor-planner",
+            repo="cipher813/alpha-engine",
+            store={"type": "sqlite", "path": db_path},
+            notify=[],
+            dependencies=["predictor-training"],
+            rate_limits={"max_alerts_per_day": 50, "dedup_cooldown_minutes": 1},
+            diagnosis={"enabled": True, "api_key": "fake-key"},
+            remediation={
+                "enabled": True,
+                "dry_run": True,
+                "market_hours_lockout": False,
+            },
+        )
+
+        # Inject fake provider (replaces the real AnthropicProvider that would
+        # fail without a valid API key)
+        fd._diagnosis_provider = _FakeProvider(category, root_cause, confidence)
+
+        return fd, db_path
+
+    def test_ib_gateway_flows_through_to_auto_remediate(self, tmp_path):
+        """IB Gateway error → diagnosis(INFRA, 0.95) → auto-remediate (dry-run)."""
+        fd, db_path = self._make_fd_with_diagnosis(
+            tmp_path,
+            category="INFRA",
+            root_cause="IB Gateway stale session — error 10197",
+            confidence=0.95,
+        )
+
+        try:
+            raise RuntimeError("No market data during competing live session (error 10197)")
+        except Exception as e:
+            report_id = fd.report(e, severity="error")
+
+        assert report_id is not None
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+
+        # Report stored
+        report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+        assert report is not None
+
+        # Diagnosis stored
+        diag = conn.execute(
+            "SELECT * FROM diagnoses WHERE report_id = ?", (report_id,)
+        ).fetchone()
+        assert diag is not None
+        assert diag["category"] == "INFRA"
+        assert diag["source"] == "fake"
+
+        # Remediation audit trail stored
+        rem = conn.execute(
+            "SELECT * FROM remediation_actions WHERE report_id = ?", (report_id,)
+        ).fetchone()
+        assert rem is not None
+        assert rem["decision_type"] == "auto_remediate"
+        assert rem["dry_run"] == 1
+        assert rem["playbook_pattern"] == "ib_gateway_stale_session"
+
+        conn.close()
+
+    def test_code_bug_flows_through_to_generate_pr(self, tmp_path):
+        """Code bug → diagnosis(CODE, 0.9) → generate_fix_pr decision."""
+        fd, db_path = self._make_fd_with_diagnosis(
+            tmp_path,
+            category="CODE",
+            root_cause="Holiday detection missing InProgress state",
+            confidence=0.9,
+        )
+
+        try:
+            raise ValueError("not a trading day — market closed")
+        except Exception as e:
+            report_id = fd.report(e, severity="error")
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        rem = conn.execute(
+            "SELECT * FROM remediation_actions WHERE report_id = ?", (report_id,)
+        ).fetchone()
+        assert rem is not None
+        assert rem["decision_type"] == "generate_fix_pr"
+        conn.close()
+
+    def test_low_confidence_flows_through_to_escalate(self, tmp_path):
+        """Low-confidence diagnosis → escalate decision."""
+        fd, db_path = self._make_fd_with_diagnosis(
+            tmp_path,
+            category="CODE",
+            root_cause="Something unclear",
+            confidence=0.5,
+        )
+
+        try:
+            raise RuntimeError("unexpected failure")
+        except Exception as e:
+            report_id = fd.report(e, severity="error")
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        rem = conn.execute(
+            "SELECT * FROM remediation_actions WHERE report_id = ?", (report_id,)
+        ).fetchone()
+        assert rem is not None
+        assert rem["decision_type"] == "escalate"
+        conn.close()
+
+    def test_warning_skips_diagnosis_and_remediation(self, tmp_path):
+        """Warnings should skip diagnosis entirely (no LLM call, no gate)."""
+        fd, db_path = self._make_fd_with_diagnosis(
+            tmp_path, category="CODE", root_cause="irrelevant", confidence=0.9,
+        )
+
+        try:
+            raise ValueError("minor issue")
+        except Exception as e:
+            report_id = fd.report(e, severity="warning")
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        diag = conn.execute(
+            "SELECT * FROM diagnoses WHERE report_id = ?", (report_id,)
+        ).fetchone()
+        # Warnings skip diagnosis
+        assert diag is None
+
+        rem = conn.execute(
+            "SELECT * FROM remediation_actions WHERE report_id = ?", (report_id,)
+        ).fetchone()
+        # No remediation either
+        assert rem is None
+        conn.close()
+
+    def test_full_pipeline_stores_cost_tracking(self, tmp_path):
+        """Diagnosis cost (tokens, USD) should be persisted."""
+        fd, db_path = self._make_fd_with_diagnosis(
+            tmp_path, category="INFRA", root_cause="OOM", confidence=0.95,
+        )
+
+        try:
+            raise MemoryError("Cannot allocate memory")
+        except Exception as e:
+            report_id = fd.report(e, severity="critical")
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        diag = conn.execute(
+            "SELECT tokens_used, cost_usd, llm_model FROM diagnoses WHERE report_id = ?",
+            (report_id,),
+        ).fetchone()
+        assert diag is not None
+        assert diag["tokens_used"] == 100
+        assert diag["cost_usd"] == 0.001
+        conn.close()
