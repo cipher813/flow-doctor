@@ -92,6 +92,21 @@ CREATE TABLE IF NOT EXISTS fix_attempts (
     created_at      TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS remediation_actions (
+    id              TEXT PRIMARY KEY,
+    report_id       TEXT REFERENCES reports(id),
+    diagnosis_id    TEXT REFERENCES diagnoses(id),
+    decision_type   TEXT NOT NULL,
+    playbook_pattern TEXT,
+    action_type     TEXT,
+    commands        TEXT,
+    dry_run         INTEGER DEFAULT 1,
+    success         INTEGER,
+    output          TEXT,
+    error           TEXT,
+    created_at      TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_reports_flow_created ON reports(flow_name, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_reports_signature ON reports(error_signature, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_diagnoses_report ON diagnoses(report_id);
@@ -161,6 +176,45 @@ class SQLiteStorage(StorageBackend):
             ),
         )
         conn.commit()
+
+    def save_remediation_action(
+        self,
+        report_id: str,
+        diagnosis_id: str,
+        decision_type: str,
+        playbook_pattern: str = None,
+        action_type: str = None,
+        commands: list = None,
+        dry_run: bool = True,
+        success: bool = None,
+        output: str = None,
+        error: str = None,
+    ) -> str:
+        from flow_doctor.core.models import _ulid
+        action_id = _ulid()
+        conn = self._conn()
+        conn.execute(
+            """INSERT INTO remediation_actions
+               (id, report_id, diagnosis_id, decision_type, playbook_pattern,
+                action_type, commands, dry_run, success, output, error, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                action_id,
+                report_id,
+                diagnosis_id,
+                decision_type,
+                playbook_pattern,
+                action_type,
+                json.dumps(commands) if commands else None,
+                1 if dry_run else 0,
+                1 if success else (0 if success is False else None),
+                output,
+                error,
+                datetime.utcnow().isoformat(),
+            ),
+        )
+        conn.commit()
+        return action_id
 
     def find_report_by_signature(
         self,
