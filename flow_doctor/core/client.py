@@ -162,7 +162,7 @@ class FlowDoctor:
                 gate_config.market_open_hour = 0
                 gate_config.market_close_hour = 0
 
-            self._decision_gate = DecisionGate(config=gate_config)
+            self._decision_gate = DecisionGate(config=gate_config, store=self._store)
             self._remediation_executor = RemediationExecutor(
                 dry_run=config.remediation.dry_run,
                 store=self._store,
@@ -350,6 +350,20 @@ class FlowDoctor:
                 )
                 self._store.save_action(action)
                 return None
+
+            # 2b. Daily cost cap check
+            max_cost = self.config.diagnosis.max_daily_cost_usd
+            if max_cost > 0:
+                daily_cost = self._store.get_daily_diagnosis_cost()
+                if daily_cost >= max_cost:
+                    action = Action(
+                        report_id=report.id,
+                        action_type="diagnosis",
+                        status=ActionStatus.DEGRADED.value,
+                        target=f"degraded - daily cost cap ${max_cost:.2f} reached (spent ${daily_cost:.2f})",
+                    )
+                    self._store.save_action(action)
+                    return None
 
             # 3. Assemble context and call LLM
             git_context = self._load_git_context()

@@ -70,9 +70,11 @@ class DecisionGate:
         self,
         playbook: Optional[Playbook] = None,
         config: Optional[GateConfig] = None,
+        store=None,
     ):
         self.playbook = playbook or Playbook()
         self.config = config or GateConfig()
+        self._store = store  # Optional SQLite store for persistent counting
         self._daily_remediation_count = 0
         self._failure_remediation_counts: Dict[str, int] = {}
         self._last_reset_date: Optional[str] = None
@@ -119,14 +121,24 @@ class DecisionGate:
             playbook_match=playbook_match,
         )
 
+    def _get_daily_remediation_count(self) -> int:
+        """Get today's remediation count — persistent (SQLite) or in-memory."""
+        if self._store:
+            try:
+                return self._store.count_remediations_today()
+            except Exception:
+                pass
+        return self._daily_remediation_count
+
     def _try_auto_remediate(
         self,
         diagnosis: Diagnosis,
         playbook_match: Optional[PlaybookPattern],
     ) -> Decision:
         """Attempt auto-remediation with safety checks."""
-        # Safety: daily limit
-        if self._daily_remediation_count >= self.config.max_auto_remediations_per_day:
+        # Safety: daily limit (persistent when store available)
+        daily_count = self._get_daily_remediation_count()
+        if daily_count >= self.config.max_auto_remediations_per_day:
             return Decision(
                 decision_type=DecisionType.ESCALATE,
                 reason=f"Daily auto-remediation limit ({self.config.max_auto_remediations_per_day}) reached",

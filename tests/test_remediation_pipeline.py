@@ -452,3 +452,47 @@ class TestEndToEnd:
         assert diag["tokens_used"] == 100
         assert diag["cost_usd"] == 0.001
         conn.close()
+
+    def test_daily_cost_cap_blocks_diagnosis(self, tmp_path):
+        """Once daily cost cap is exceeded, further diagnoses are degraded."""
+        db_path = str(tmp_path / "cost_cap_test.db")
+
+        # Use a tiny cost cap ($0.002) — our fake provider costs $0.001 per call
+        fd = flow_doctor.init(
+            flow_name="executor-planner",
+            repo="cipher813/alpha-engine",
+            store={"type": "sqlite", "path": db_path},
+            notify=[],
+            rate_limits={
+                "max_alerts_per_day": 50,
+                "max_diagnosed_per_day": 50,
+                "dedup_cooldown_minutes": 1,
+            },
+            diagnosis={
+                "enabled": True,
+                "api_key": "fake-key",
+                "max_daily_cost_usd": 0.002,
+            },
+            remediation={"enabled": False},
+        )
+        fd._diagnosis_provider = _FakeProvider("INFRA", "test", 0.95)
+
+        # First two calls should produce diagnoses ($0.001 each = $0.002 total)
+        ids = []
+        for exc_cls in (ValueError, TypeError, RuntimeError):
+            try:
+                raise exc_cls("test error")
+            except Exception as e:
+                ids.append(fd.report(e, severity="error"))
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        diag_count = conn.execute("SELECT COUNT(*) FROM diagnoses").fetchone()[0]
+        degraded_count = conn.execute(
+            "SELECT COUNT(*) FROM actions WHERE status = 'degraded' AND target LIKE '%cost cap%'"
+        ).fetchone()[0]
+        conn.close()
+
+        # Should have some diagnoses and at least one degraded action
+        assert diag_count >= 1, "At least one diagnosis should succeed"
+        assert degraded_count >= 1, "Cost cap should block at least one diagnosis"

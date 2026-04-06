@@ -55,6 +55,7 @@ class DiagnosisConfig:
     api_key: Optional[str] = None
     confidence_calibration: float = 0.85
     timeout_seconds: int = 30
+    max_daily_cost_usd: float = 1.00  # Hard cap on daily LLM spend
 
 
 @dataclass
@@ -276,6 +277,7 @@ def load_config(
             api_key=diag_raw.get("api_key"),
             confidence_calibration=float(diag_raw.get("confidence_calibration", 0.85)),
             timeout_seconds=int(diag_raw.get("timeout_seconds", 30)),
+            max_daily_cost_usd=float(diag_raw.get("max_daily_cost_usd", 1.00)),
         )
     else:
         diagnosis_config = DiagnosisConfig()

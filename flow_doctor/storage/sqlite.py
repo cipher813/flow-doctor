@@ -216,6 +216,27 @@ class SQLiteStorage(StorageBackend):
         conn.commit()
         return action_id
 
+    def get_daily_diagnosis_cost(self) -> float:
+        """Sum of cost_usd for all diagnoses created today."""
+        conn = self._conn()
+        today = date.today().isoformat()
+        row = conn.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) FROM diagnoses WHERE created_at >= ?",
+            (today,),
+        ).fetchone()
+        return float(row[0]) if row else 0.0
+
+    def count_remediations_today(self) -> int:
+        """Count auto-remediation actions executed today (persistent daily limit)."""
+        conn = self._conn()
+        today = date.today().isoformat()
+        row = conn.execute(
+            """SELECT COUNT(*) FROM remediation_actions
+               WHERE decision_type = 'auto_remediate' AND created_at >= ?""",
+            (today,),
+        ).fetchone()
+        return row[0] if row else 0
+
     def find_report_by_signature(
         self,
         error_signature: str,
