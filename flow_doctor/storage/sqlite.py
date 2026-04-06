@@ -261,6 +261,32 @@ class SQLiteStorage(StorageBackend):
         )
         conn.commit()
 
+    def count_reports_today(self, flow_name: Optional[str] = None) -> int:
+        """Count reports created today, optionally filtered by flow_name."""
+        conn = self._conn()
+        today = date.today().isoformat()
+        if flow_name:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM reports WHERE flow_name = ? AND created_at >= ?",
+                (flow_name, today),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM reports WHERE created_at >= ?",
+                (today,),
+            ).fetchone()
+        return row[0] if row else 0
+
+    def count_diagnoses_today(self) -> int:
+        """Count diagnoses created today."""
+        conn = self._conn()
+        today = date.today().isoformat()
+        row = conn.execute(
+            "SELECT COUNT(*) FROM diagnoses WHERE created_at >= ?",
+            (today,),
+        ).fetchone()
+        return row[0] if row else 0
+
     def count_actions_today(self, action_type: str) -> int:
         conn = self._conn()
         today_start = datetime.combine(date.today(), datetime.min.time()).isoformat()

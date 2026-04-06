@@ -73,6 +73,7 @@ class FlowDoctor:
             self._digest_generator = DigestGenerator(self._store)
 
             self._healthy = True
+            self._log_startup()
         except Exception:
             import sys
             print(
@@ -609,6 +610,78 @@ class FlowDoctor:
         except Exception as e:
             print(f"[flow-doctor] history() error: {e}", file=sys.stderr)
             return []
+
+    def status(self) -> Dict[str, Any]:
+        """Return a summary of flow-doctor's current state.
+
+        Useful for health checks, EOD summaries, and verifying flow-doctor is active.
+        """
+        result: Dict[str, Any] = {
+            "healthy": self._healthy,
+            "flow_name": self.config.flow_name,
+            "store": self.config.store.type,
+        }
+
+        if not self._healthy or not self._store:
+            return result
+
+        try:
+            result["reports_today"] = self._store.count_reports_today(self.config.flow_name)
+            result["diagnoses_today"] = self._store.count_diagnoses_today()
+            result["diagnosis_cost_today_usd"] = self._store.get_daily_diagnosis_cost()
+            result["remediations_today"] = self._store.count_remediations_today()
+            result["diagnosis_enabled"] = self.config.diagnosis.enabled
+            result["remediation_enabled"] = self.config.remediation.enabled
+            result["remediation_dry_run"] = self.config.remediation.dry_run
+            result["notifiers"] = len(self._notifiers)
+            result["max_daily_cost_usd"] = self.config.diagnosis.max_daily_cost_usd
+        except Exception as e:
+            result["status_error"] = str(e)
+
+        return result
+
+    def log_summary(self, logger: Optional[logging.Logger] = None) -> str:
+        """Log a one-line summary of today's activity. Returns the summary string.
+
+        Call this at EOD, on shutdown, or periodically to confirm flow-doctor is alive.
+        """
+        s = self.status()
+        parts = [f"flow-doctor [{s.get('flow_name', '?')}]"]
+
+        if not s.get("healthy"):
+            parts.append("DEGRADED")
+        else:
+            parts.append(f"reports={s.get('reports_today', 0)}")
+            parts.append(f"diagnoses={s.get('diagnoses_today', 0)}")
+            cost = s.get("diagnosis_cost_today_usd", 0)
+            if cost > 0:
+                parts.append(f"cost=${cost:.3f}")
+            rem = s.get("remediations_today", 0)
+            if rem > 0:
+                parts.append(f"remediations={rem}")
+
+        summary = " | ".join(parts)
+        target = logger or logging.getLogger("flow_doctor")
+        target.info(summary)
+        return summary
+
+    def _log_startup(self) -> None:
+        """Log startup info so operators can confirm flow-doctor is active."""
+        components = []
+        components.append(f"store={self.config.store.type}")
+        components.append(f"notifiers={len(self._notifiers)}")
+        if self.config.diagnosis.enabled:
+            components.append(f"diagnosis=on(max_cost=${self.config.diagnosis.max_daily_cost_usd:.2f}/day)")
+        else:
+            components.append("diagnosis=off")
+        if self.config.remediation.enabled:
+            mode = "dry-run" if self.config.remediation.dry_run else "LIVE"
+            components.append(f"remediation={mode}")
+        else:
+            components.append("remediation=off")
+
+        msg = f"[flow-doctor] initialized: {self.config.flow_name} ({', '.join(components)})"
+        logging.getLogger("flow_doctor").info(msg)
 
     def digest(self, since: Optional[datetime] = None) -> Optional[str]:
         """Generate and optionally send the daily digest.

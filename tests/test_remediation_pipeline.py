@@ -453,6 +453,44 @@ class TestEndToEnd:
         assert diag["cost_usd"] == 0.001
         conn.close()
 
+    def test_status_returns_healthy_summary(self, tmp_path):
+        """status() should report healthy state and zero counts on fresh init."""
+        fd, _ = self._make_fd_with_diagnosis(
+            tmp_path, category="INFRA", root_cause="test", confidence=0.95,
+        )
+        s = fd.status()
+        assert s["healthy"] is True
+        assert s["flow_name"] == "executor-planner"
+        assert s["reports_today"] == 0
+        assert s["diagnoses_today"] == 0
+        assert s["diagnosis_cost_today_usd"] == 0.0
+
+    def test_status_reflects_activity(self, tmp_path):
+        """status() should reflect reports and diagnoses after report() is called."""
+        fd, _ = self._make_fd_with_diagnosis(
+            tmp_path, category="INFRA", root_cause="test", confidence=0.95,
+        )
+
+        try:
+            raise RuntimeError("test error for status")
+        except Exception as e:
+            fd.report(e, severity="error")
+
+        s = fd.status()
+        assert s["reports_today"] >= 1
+        assert s["diagnoses_today"] >= 1
+        assert s["diagnosis_cost_today_usd"] > 0
+
+    def test_log_summary_returns_string(self, tmp_path):
+        """log_summary() should return a readable one-liner."""
+        fd, _ = self._make_fd_with_diagnosis(
+            tmp_path, category="INFRA", root_cause="test", confidence=0.95,
+        )
+        summary = fd.log_summary()
+        assert "flow-doctor" in summary
+        assert "executor-planner" in summary
+        assert "reports=" in summary
+
     def test_daily_cost_cap_blocks_diagnosis(self, tmp_path):
         """Once daily cost cap is exceeded, further diagnoses are degraded."""
         db_path = str(tmp_path / "cost_cap_test.db")
