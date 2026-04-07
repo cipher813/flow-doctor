@@ -26,3 +26,5 @@ build/
 # Design docs (local only)
 *-design-*.md
 *-design.md
+
+.gitleaksbaseline.json
