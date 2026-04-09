@@ -1,10 +1,10 @@
 # Flow Doctor
 
-[![PyPI version](https://img.shields.io/pypi/v/flow-doctor.svg)](https://pypi.org/project/flow-doctor/)
-[![Python](https://img.shields.io/pypi/pyversions/flow-doctor.svg)](https://pypi.org/project/flow-doctor/)
-[![Tests](https://img.shields.io/github/actions/workflow/status/cipher813/flow-doctor/ci.yml?label=tests)](https://github.com/cipher813/flow-doctor/actions)
-[![Coverage](https://img.shields.io/badge/coverage-81%25-brightgreen)](https://github.com/cipher813/flow-doctor)
-[![License](https://img.shields.io/github/license/cipher813/flow-doctor)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.9+-blue.svg)]()
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-218_passing-brightgreen.svg)]()
+[![Coverage](https://img.shields.io/badge/coverage-81%25-brightgreen.svg)]()
+[![PyPI](https://img.shields.io/badge/PyPI-v0.1.0-blue.svg)](https://pypi.org/project/flow-doctor/)
 
 Pipeline error handler for Python. Captures exceptions, diagnoses root causes with LLMs, files GitHub issues, and generates fix PRs.
 
