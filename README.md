@@ -57,7 +57,7 @@ notify:
 
 store:
   type: sqlite
-  path: /tmp/flow_doctor.db
+  path: flow_doctor.db
 
 diagnosis:
   enabled: true
@@ -98,7 +98,7 @@ You can also configure inline without a YAML file:
 fd = flow_doctor.init(
     flow_name="my-pipeline",
     repo="owner/repo",
-    store="sqlite:///tmp/flow_doctor.db",
+    store="sqlite://flow_doctor.db",
     notify=["slack:#alerts", "email:oncall@example.com"],
 )
 ```

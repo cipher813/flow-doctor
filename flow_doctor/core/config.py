@@ -32,7 +32,7 @@ class NotifyChannelConfig:
 @dataclass
 class StoreConfig:
     type: str = "sqlite"
-    path: str = "/tmp/flow_doctor.db"
+    path: str = "flow_doctor.db"
     bucket: Optional[str] = None
     prefix: Optional[str] = None
 
@@ -211,7 +211,7 @@ def _parse_store(raw: Any) -> StoreConfig:
         raw = _resolve_dict(raw)
         return StoreConfig(
             type=raw.get("type", "sqlite"),
-            path=raw.get("path", "/tmp/flow_doctor.db"),
+            path=raw.get("path", "flow_doctor.db"),
             bucket=raw.get("bucket"),
             prefix=raw.get("prefix"),
         )
