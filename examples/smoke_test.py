@@ -15,8 +15,8 @@ if os.path.exists(db_path):
 
 fd = flow_doctor.init(
     flow_name="test-flow",
-    repo="cipher813/alpha-engine-research",
-    owner="@brianmcmahon",
+    repo="your-org/your-repo",
+    owner="@your-username",
     store=f"sqlite:///{db_path}",
 )
 

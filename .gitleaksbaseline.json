@@ -1,0 +1,23 @@
+[
+ {
+  "RuleID": "generic-api-key",
+  "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+  "StartLine": 102,
+  "EndLine": 102,
+  "StartColumn": 15,
+  "EndColumn": 61,
+  "Match": "AWS_SECRET_ACCESS_KEY\": \"wJalrXUtnFEMI/K7MDENG\"",
+  "Secret": "wJalrXUtnFEMI/K7MDENG",
+  "File": "examples/smoke_test.py",
+  "SymlinkFile": "",
+  "Commit": "d45d541cf04defe082b44feebfd584a5e2a87dee",
+  "Link": "https://github.com/cipher813/flow-doctor/blob/d45d541cf04defe082b44feebfd584a5e2a87dee/examples/smoke_test.py#L102",
+  "Entropy": 4.2018414,
+  "Author": "Brian McMahon",
+  "Email": "cipher813@gmail.com",
+  "Date": "2026-03-17T19:00:00Z",
+  "Message": "commit phase 3 updates",
+  "Tags": [],
+  "Fingerprint": "d45d541cf04defe082b44feebfd584a5e2a87dee:examples/smoke_test.py:generic-api-key:102"
+ }
+]

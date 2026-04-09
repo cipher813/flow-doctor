@@ -119,7 +119,7 @@ CREATE INDEX IF NOT EXISTS idx_actions_type_created ON actions(action_type, crea
 class SQLiteStorage(StorageBackend):
     """SQLite-backed storage. Thread-safe via per-thread connections."""
 
-    def __init__(self, db_path: str = "/tmp/flow_doctor.db"):
+    def __init__(self, db_path: str = "flow_doctor.db"):
         self.db_path = db_path
         self._local = threading.local()
 
