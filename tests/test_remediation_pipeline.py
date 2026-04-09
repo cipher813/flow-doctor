@@ -132,7 +132,7 @@ class TestFullPipeline:
 
         fd = flow_doctor.init(
             flow_name="executor-planner",
-            repo="cipher813/alpha-engine",
+            repo="test-org/test-repo",
             store={"type": "sqlite", "path": db_path},
             notify=[],
             dependencies=["predictor-training", "data-phase1"],
@@ -168,13 +168,31 @@ class TestFullPipeline:
         fd, db_path = self._make_fd(tmp_path)
 
         # Manually inject a decision gate with a playbook that matches
-        # (Without LLM diagnosis, the gate won't fire through report(),
-        # but we can test the gate directly)
         from flow_doctor.remediation.decision_gate import DecisionGate, GateConfig
+        from flow_doctor.remediation.playbook import Playbook, PlaybookPattern, RemediationAction
 
-        gate = DecisionGate(config=GateConfig(
-            market_open_hour=0, market_close_hour=0,
-        ))
+        test_playbook = Playbook(patterns=[
+            PlaybookPattern(
+                name="ib_gateway_stale",
+                description="IB Gateway stale session",
+                category="INFRA",
+                message_pattern=r"(10197|competing live session)",
+                flow_names=["executor-planner"],
+                action=RemediationAction(
+                    action_type=RemediationType.RESTART_SERVICE,
+                    description="Restart IB Gateway",
+                    commands=["sudo systemctl restart ibgateway"],
+                    safe_during_market_hours=False,
+                ),
+            ),
+        ])
+
+        gate = DecisionGate(
+            playbook=test_playbook,
+            config=GateConfig(
+                market_open_hour=0, market_close_hour=0,
+            ),
+        )
 
         diagnosis = Diagnosis(
             report_id="test-r1", flow_name="executor-planner",
@@ -229,12 +247,56 @@ class TestFullPipeline:
             assert result is not None or result is None  # just no crash
 
     def test_decision_gate_routes_all_five_failures(self, tmp_path):
-        """Verify the 5 failure types from 2026-04-06 are routed correctly."""
+        """Verify the 5 failure types are routed correctly with a test playbook."""
         from flow_doctor.remediation.decision_gate import DecisionGate, GateConfig
+        from flow_doctor.remediation.playbook import Playbook, PlaybookPattern, RemediationAction
 
-        gate = DecisionGate(config=GateConfig(
-            market_open_hour=0, market_close_hour=0,
-        ))
+        test_playbook = Playbook(patterns=[
+            PlaybookPattern(
+                name="step_function_denied",
+                description="Step Function access denied",
+                category="CONFIG",
+                message_pattern=r"(AccessDenied|states:StartExecution|not authorized)",
+                flow_names=["weekday-pipeline"],
+                action=RemediationAction(
+                    action_type=RemediationType.RERUN_STEP,
+                    description="Retry Step Function",
+                ),
+            ),
+            PlaybookPattern(
+                name="ib_gateway_stale",
+                description="IB Gateway stale session",
+                category="INFRA",
+                message_pattern=r"(10197|competing live session)",
+                flow_names=["executor-planner"],
+                action=RemediationAction(
+                    action_type=RemediationType.RESTART_SERVICE,
+                    description="Restart IB Gateway",
+                    commands=["sudo systemctl restart ibgateway"],
+                    safe_during_market_hours=False,
+                ),
+            ),
+            PlaybookPattern(
+                name="daemon_not_running",
+                description="Daemon not running",
+                category="INFRA",
+                message_pattern=r"(daemon.*inactive|daemon.*not running)",
+                flow_names=["executor-daemon"],
+                action=RemediationAction(
+                    action_type=RemediationType.RESTART_SERVICE,
+                    description="Restart daemon",
+                    commands=["sudo systemctl restart daemon"],
+                    safe_during_market_hours=True,
+                ),
+            ),
+        ])
+
+        gate = DecisionGate(
+            playbook=test_playbook,
+            config=GateConfig(
+                market_open_hour=0, market_close_hour=0,
+            ),
+        )
 
         failures = [
             # (category, confidence, error_type, error_message, flow_name, expected_decision)
@@ -298,7 +360,7 @@ class TestEndToEnd:
 
         fd = flow_doctor.init(
             flow_name="executor-planner",
-            repo="cipher813/alpha-engine",
+            repo="test-org/test-repo",
             store={"type": "sqlite", "path": db_path},
             notify=[],
             dependencies=["predictor-training"],
@@ -314,6 +376,26 @@ class TestEndToEnd:
         # Inject fake provider (replaces the real AnthropicProvider that would
         # fail without a valid API key)
         fd._diagnosis_provider = _FakeProvider(category, root_cause, confidence)
+
+        # Inject test playbook (no baked-in patterns in generic package)
+        from flow_doctor.remediation.playbook import Playbook, PlaybookPattern, RemediationAction
+        test_playbook = Playbook(patterns=[
+            PlaybookPattern(
+                name="ib_gateway_stale_session",
+                description="IB Gateway stale session",
+                category="INFRA",
+                message_pattern=r"(10197|competing live session)",
+                flow_names=["executor-planner"],
+                action=RemediationAction(
+                    action_type=RemediationType.RESTART_SERVICE,
+                    description="Restart IB Gateway",
+                    commands=["sudo systemctl restart ibgateway"],
+                    safe_during_market_hours=False,
+                ),
+            ),
+        ])
+        if fd._decision_gate:
+            fd._decision_gate.playbook = test_playbook
 
         return fd, db_path
 
@@ -498,7 +580,7 @@ class TestEndToEnd:
         # Use a tiny cost cap ($0.002) — our fake provider costs $0.001 per call
         fd = flow_doctor.init(
             flow_name="executor-planner",
-            repo="cipher813/alpha-engine",
+            repo="test-org/test-repo",
             store={"type": "sqlite", "path": db_path},
             notify=[],
             rate_limits={
