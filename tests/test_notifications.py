@@ -66,21 +66,24 @@ def test_slack_notifier_sends():
         error_message="boom",
         severity="error",
     )
-    success = notifier.send(report, "test")
+    target = notifier.send(report, "test")
     thread.join(timeout=5)
     server.server_close()
 
-    assert success is True
+    # send() now returns Optional[str] — target identifier on success,
+    # None on failure. Truthy string means the notifier delivered.
+    assert target is not None
+    assert isinstance(target, str)
     assert len(_SlackHandler.received) == 1
     assert "boom" in _SlackHandler.received[0]["text"]
 
 
 def test_slack_notifier_handles_failure():
-    """Slack notifier should return False on connection error, not raise."""
+    """Slack notifier should return None on connection error, not raise."""
     notifier = SlackNotifier("http://127.0.0.1:1/nonexistent")
     report = Report(flow_name="test", error_message="boom", severity="error")
     result = notifier.send(report, "test")
-    assert result is False
+    assert result is None
 
 
 def test_email_notifier_format():
@@ -102,7 +105,7 @@ def test_email_notifier_format():
 
 
 def test_email_notifier_handles_failure():
-    """Email notifier should return False on connection error, not raise."""
+    """Email notifier should return None on connection error, not raise."""
     notifier = EmailNotifier(
         sender="test@example.com",
         recipients="admin@example.com",
@@ -111,4 +114,4 @@ def test_email_notifier_handles_failure():
     )
     report = Report(flow_name="test", error_message="boom", severity="error")
     result = notifier.send(report, "test")
-    assert result is False
+    assert result is None

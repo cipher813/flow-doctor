@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.3.0 (2026-04-10)
+
+`Notifier.send()` return type changes to `Optional[str]` so the dispatcher
+can persist the target identifier (GitHub issue URL, email recipients,
+Slack channel) in `actions.target`. Breaking change for anyone subclassing
+`Notifier` externally.
+
+### Breaking changes
+
+- `Notifier.send()` now returns `Optional[str]` instead of `bool`. On
+  success, the return value is a target identifier string that flow-doctor
+  persists in `actions.target`. On failure, the return value is `None`.
+  Callers should check truthiness (`if send(...)`) instead of `== True`.
+- Subclasses of `Notifier` outside the flow-doctor package need to update
+  their `send()` return type. The semantic is backward-compatible at the
+  truthiness level — `None` is falsy like `False` was — but strict type
+  assertions will fail.
+
+### Fixes
+
+- `actions.target` is now populated for every delivered notification.
+  Previously it was always `None`, which meant the DB had no link back
+  to filed GitHub issues. Introduced by the v0.2.0 fail-loud refactor
+  and surfaced during the 2026-04-10 alpha-engine incident verification.
+
+### Notifier-specific target formats
+
+- **GitHubNotifier**: returns the full `html_url` from the GitHub issue
+  API response (e.g., `https://github.com/owner/repo/issues/42`). Falls
+  back to the generic `https://github.com/{repo}/issues` if the API
+  response unexpectedly lacks `html_url`.
+- **EmailNotifier**: returns the comma-joined recipients string
+  (e.g., `"oncall@example.com, backup@example.com"`).
+- **SlackNotifier**: returns the channel string (e.g., `"#alerts"`) or
+  the literal `"slack"` if no channel is configured. **Does not return
+  the webhook URL** — that's a secret and should not be persisted to
+  the DB.
+
+### Tests
+
+- New `tests/test_action_target.py`: 7 tests pinning the new contract
+  across all three notifier types plus dispatcher-level persistence
+  and failure paths.
+- Updated 7 pre-existing tests in `test_notifications.py`,
+  `test_github_notifier.py`, and `test_coverage_gaps.py` from
+  `assert result is True/False` to `assert result is None/str`.
+- Full suite: 250 tests passing (243 + 7 new).
+
 ## 0.2.0 (2026-04-10)
 
 Fail-loud contract and canonical `FLOW_DOCTOR_*` env var fallbacks. Breaking

@@ -33,7 +33,7 @@ class GitHubNotifier(Notifier):
         report: Report,
         flow_name: str,
         diagnosis: Optional[Diagnosis] = None,
-    ) -> bool:
+    ) -> Optional[str]:
         try:
             title = self._format_title(report, flow_name, diagnosis)
             body = self._format_body(report, flow_name, diagnosis)
@@ -58,12 +58,16 @@ class GitHubNotifier(Notifier):
             )
             with urlopen(req, timeout=15) as resp:
                 if resp.status == 201:
-                    return True
+                    # Return the user-facing issue URL so the dispatcher
+                    # can persist it in actions.target for traceability.
+                    response_body = json.loads(resp.read().decode("utf-8"))
+                    issue_url = response_body.get("html_url", "")
+                    return issue_url or f"https://github.com/{self.repo}/issues"
                 _logger.critical(
                     "flow-doctor GitHub issue creation returned HTTP %s for repo %s",
                     resp.status, self.repo,
                 )
-                return False
+                return None
         except Exception as e:
             # Log via Python logging at CRITICAL so host apps see it in their
             # log stream (journalctl/Sentry/Datadog). Also keep the stderr
@@ -73,7 +77,7 @@ class GitHubNotifier(Notifier):
                 self.repo, e, exc_info=True,
             )
             print(f"[flow-doctor] GitHub issue creation failed: {e}", file=sys.stderr)
-            return False
+            return None
 
     @staticmethod
     def comment_on_issue(

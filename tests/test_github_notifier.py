@@ -98,13 +98,17 @@ def test_send_success():
 
     mock_resp = MagicMock()
     mock_resp.status = 201
+    mock_resp.read.return_value = json.dumps(
+        {"html_url": "https://github.com/owner/repo/issues/42"}
+    ).encode("utf-8")
     mock_resp.__enter__ = lambda s: s
     mock_resp.__exit__ = lambda s, *a: None
 
     with patch("flow_doctor.notify.github.urlopen", return_value=mock_resp) as mock_url:
         result = notifier.send(report, "test-flow")
 
-    assert result is True
+    # send() now returns the issue URL on success (Optional[str] contract)
+    assert result == "https://github.com/owner/repo/issues/42"
     call_args = mock_url.call_args
     req = call_args[0][0]
     assert "owner/repo" in req.full_url
@@ -119,4 +123,5 @@ def test_send_failure():
     with patch("flow_doctor.notify.github.urlopen", side_effect=Exception("API error")):
         result = notifier.send(report, "test-flow")
 
-    assert result is False
+    # send() returns None on failure (Optional[str] contract)
+    assert result is None
