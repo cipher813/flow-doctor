@@ -608,17 +608,22 @@ class FlowDoctor:
 
             attempted += 1
 
-            # Send
+            # Send. Notifier.send() returns Optional[str] — a target
+            # identifier (URL, email recipients, channel) on success, or
+            # None on failure. The target is persisted in actions.target
+            # so operators can link back to the filed issue / sent email
+            # from the DB.
             try:
-                success = notifier.send(report, self.config.flow_name, diagnosis)
+                target = notifier.send(report, self.config.flow_name, diagnosis)
                 action = Action(
                     report_id=report.id,
                     action_type=action_type,
-                    status=ActionStatus.SENT.value if success else ActionStatus.FAILED.value,
+                    status=ActionStatus.SENT.value if target else ActionStatus.FAILED.value,
+                    target=target,
                     diagnosis_id=diagnosis.id if diagnosis else None,
                 )
                 self._store.save_action(action)
-                if not success:
+                if not target:
                     failed.append(action_type)
                     _logger.critical(
                         "flow-doctor notifier %s returned failure for report %s "

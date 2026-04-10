@@ -27,7 +27,7 @@ class SlackNotifier(Notifier):
         report: Report,
         flow_name: str,
         diagnosis: Optional[Diagnosis] = None,
-    ) -> bool:
+    ) -> Optional[str]:
         try:
             text = self._format_message(report, flow_name, diagnosis)
             payload = {"text": text}
@@ -43,17 +43,20 @@ class SlackNotifier(Notifier):
             )
             with urlopen(req, timeout=10) as resp:
                 if resp.status == 200:
-                    return True
+                    # Return channel (if set) or a generic "slack" target.
+                    # We don't return the full webhook_url because it's
+                    # a secret that shouldn't be persisted to the DB.
+                    return self.channel or "slack"
                 _logger.critical(
                     "flow-doctor Slack webhook returned HTTP %s", resp.status,
                 )
-                return False
+                return None
         except Exception as e:
             _logger.critical(
                 "flow-doctor Slack notification failed: %s", e, exc_info=True,
             )
             print(f"[flow-doctor] Slack notification failed: {e}", file=sys.stderr)
-            return False
+            return None
 
     @staticmethod
     def _format_message(

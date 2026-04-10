@@ -17,7 +17,7 @@ class Notifier(ABC):
         report: Report,
         flow_name: str,
         diagnosis: Optional[Diagnosis] = None,
-    ) -> bool:
+    ) -> Optional[str]:
         """Send a notification for the given report.
 
         Args:
@@ -25,5 +25,13 @@ class Notifier(ABC):
             flow_name: Name of the flow that failed.
             diagnosis: Optional diagnosis to enrich the notification.
 
-        Returns True on success, False on failure.
+        Returns:
+            On success, a target identifier string that will be stored in
+            the action record's ``target`` field — typically a user-facing
+            URL (GitHub issue URL, Slack webhook endpoint) or address
+            (email recipients). On failure, ``None``.
+
+            Callers should use truthiness (``if send(...)``) to distinguish
+            success from failure, and use the value to construct follow-up
+            links when it is non-empty.
         """

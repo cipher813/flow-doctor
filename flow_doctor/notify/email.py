@@ -36,7 +36,7 @@ class EmailNotifier(Notifier):
         report: Report,
         flow_name: str,
         diagnosis: Optional[Diagnosis] = None,
-    ) -> bool:
+    ) -> Optional[str]:
         try:
             subject = f"[Flow Doctor] [{report.severity.upper()}] {flow_name}"
             if report.error_type:
@@ -55,14 +55,16 @@ class EmailNotifier(Notifier):
                 if self.smtp_password:
                     server.login(self.sender, self.smtp_password)
                 server.sendmail(self.sender, self.recipients, msg.as_string())
-            return True
+            # Return recipients as the action.target so operators can see
+            # who got the email without digging through SMTP logs.
+            return ", ".join(self.recipients)
         except Exception as e:
             _logger.critical(
                 "flow-doctor email notification failed (sender=%s, host=%s): %s",
                 self.sender, self.smtp_host, e, exc_info=True,
             )
             print(f"[flow-doctor] Email notification failed: {e}", file=sys.stderr)
-            return False
+            return None
 
     @staticmethod
     def _format_body(

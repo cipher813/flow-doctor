@@ -115,7 +115,7 @@ class TestEmailFormatter:
         assert "Captured Logs" in body
         assert "line1" in body
 
-    def test_send_returns_false_on_connection_error(self):
+    def test_send_returns_none_on_connection_error(self):
         notifier = EmailNotifier(
             sender="test@example.com",
             recipients="admin@example.com",
@@ -124,7 +124,8 @@ class TestEmailFormatter:
         )
         report = _make_report()
         result = notifier.send(report, "test-flow")
-        assert result is False
+        # send() returns None on failure (Optional[str] contract)
+        assert result is None
 
     def test_init_splits_recipients(self):
         notifier = EmailNotifier(
@@ -181,14 +182,15 @@ class TestSlackFormatter:
         assert "line2" in msg
         assert "line6" in msg
 
-    def test_send_returns_false_on_error(self):
+    def test_send_returns_none_on_error(self):
         notifier = SlackNotifier(
             webhook_url="http://invalid.host.example.com/webhook",
             channel="#test",
         )
         report = _make_report()
         result = notifier.send(report, "test-flow")
-        assert result is False
+        # send() returns None on failure (Optional[str] contract)
+        assert result is None
 
 
 # ── Remediation Executor Tests ────────────────────────────────────────────
