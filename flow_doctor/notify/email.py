@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import smtplib
 import sys
 from email.mime.text import MIMEText
@@ -9,6 +10,8 @@ from typing import Optional
 
 from flow_doctor.core.models import Diagnosis, Report
 from flow_doctor.notify.base import Notifier
+
+_logger = logging.getLogger("flow_doctor")
 
 
 class EmailNotifier(Notifier):
@@ -54,6 +57,10 @@ class EmailNotifier(Notifier):
                 server.sendmail(self.sender, self.recipients, msg.as_string())
             return True
         except Exception as e:
+            _logger.critical(
+                "flow-doctor email notification failed (sender=%s, host=%s): %s",
+                self.sender, self.smtp_host, e, exc_info=True,
+            )
             print(f"[flow-doctor] Email notification failed: {e}", file=sys.stderr)
             return False
 

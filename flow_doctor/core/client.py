@@ -14,11 +14,40 @@ from typing import Any, Callable, Dict, List, Optional
 
 from flow_doctor.core.config import FlowDoctorConfig, load_config
 from flow_doctor.core.dedup import DedupChecker, compute_error_signature, compute_signature_from_exception
+from flow_doctor.core.errors import ConfigError
 from flow_doctor.core.models import Action, ActionStatus, ActionType, Diagnosis, Report, Severity
 from flow_doctor.core.rate_limiter import CascadeDetector, RateLimiter
 from flow_doctor.core.scrubber import Scrubber
 from flow_doctor.notify.base import Notifier
 from flow_doctor.storage.base import StorageBackend
+
+# Module logger — used to surface notifier failures to the host app's log stream
+# instead of only printing to stderr. Host apps catch CRITICAL records via their
+# own logging configuration (journalctl, Sentry, Datadog, etc.).
+_logger = logging.getLogger("flow_doctor")
+
+# Env var fallback chains. Each notifier field falls back through this list,
+# stopping at the first non-empty value. FLOW_DOCTOR_* names are the canonical
+# contract; the others are conveniences that pick up common conventions like
+# the `gh` CLI's GH_TOKEN or GitHub Actions' GITHUB_TOKEN.
+_ENV_FALLBACKS: Dict[str, List[str]] = {
+    "github_token": ["FLOW_DOCTOR_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"],
+    "github_repo": ["FLOW_DOCTOR_GITHUB_REPO"],
+    "smtp_password": ["FLOW_DOCTOR_SMTP_PASSWORD", "GMAIL_APP_PASSWORD"],
+    "smtp_sender": ["FLOW_DOCTOR_SMTP_SENDER", "EMAIL_SENDER"],
+    "smtp_recipients": ["FLOW_DOCTOR_SMTP_RECIPIENTS", "EMAIL_RECIPIENTS"],
+    "slack_webhook": ["FLOW_DOCTOR_SLACK_WEBHOOK", "SLACK_WEBHOOK_URL"],
+    "anthropic_api_key": ["FLOW_DOCTOR_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
+}
+
+
+def _env_fallback(key: str) -> Optional[str]:
+    """Return the first non-empty env var from the fallback chain for ``key``."""
+    for name in _ENV_FALLBACKS.get(key, []):
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
 
 
 class _LogCaptureHandler(logging.Handler):
@@ -38,7 +67,18 @@ class _LogCaptureHandler(logging.Handler):
 class FlowDoctor:
     """Main Flow Doctor client."""
 
-    def __init__(self, config: FlowDoctorConfig):
+    def __init__(self, config: FlowDoctorConfig, *, strict: bool = True):
+        """Initialize a FlowDoctor instance.
+
+        Args:
+            config: Loaded config object.
+            strict: If True (default), any initialization failure raises.
+                If False, init errors are printed to stderr and the instance
+                operates in degraded mode (no notifiers, ``_healthy=False``).
+                The strict default is intentional: silent degradation means
+                users discover broken error monitoring only during an actual
+                incident, which defeats the purpose of the tool.
+        """
         self.config = config
         self._scrubber = Scrubber()
         self._store: Optional[StorageBackend] = None
@@ -75,9 +115,12 @@ class FlowDoctor:
             self._healthy = True
             self._log_startup()
         except Exception:
+            if strict:
+                raise
             import sys
             print(
-                f"[flow-doctor] WARNING: initialization failed, operating in degraded mode",
+                "[flow-doctor] WARNING: initialization failed, operating in degraded mode "
+                "(strict=False). This is a best-effort mode — set strict=True to fail loud.",
                 file=sys.stderr,
             )
             import traceback as _tb
@@ -94,27 +137,91 @@ class FlowDoctor:
 
     @staticmethod
     def _init_notifiers(config: FlowDoctorConfig) -> List[Notifier]:
+        """Build notifier instances from config, failing loud on missing fields.
+
+        Each notifier type has a set of required fields. If a notifier is
+        listed in ``config.notify`` but any required field is missing (after
+        checking env var fallbacks), a ``ConfigError`` is raised naming the
+        specific field and the env vars that would satisfy it.
+
+        The old behavior was to silently drop misconfigured notifiers, which
+        meant users discovered broken notifications only during an incident.
+        The new behavior surfaces config bugs at ``init()`` time.
+        """
         notifiers: List[Notifier] = []
-        for nc in config.notify:
-            if nc.type == "slack" and nc.webhook_url:
+        for idx, nc in enumerate(config.notify):
+            label = f"notify[{idx}] (type={nc.type})"
+
+            if nc.type == "slack":
+                webhook = nc.webhook_url or _env_fallback("slack_webhook")
+                if not webhook:
+                    raise ConfigError(
+                        f"{label}: slack notifier requires a webhook_url. "
+                        f"Set it in config or via one of: "
+                        f"{', '.join(_ENV_FALLBACKS['slack_webhook'])}."
+                    )
                 from flow_doctor.notify.slack import SlackNotifier
-                notifiers.append(SlackNotifier(nc.webhook_url, nc.channel))
-            elif nc.type == "email" and nc.sender and nc.recipients:
+                notifiers.append(SlackNotifier(webhook, nc.channel))
+
+            elif nc.type == "email":
+                sender = nc.sender or _env_fallback("smtp_sender")
+                recipients = nc.recipients or _env_fallback("smtp_recipients")
+                password = nc.smtp_password or _env_fallback("smtp_password")
+                missing = []
+                if not sender:
+                    missing.append(
+                        f"sender (or one of: {', '.join(_ENV_FALLBACKS['smtp_sender'])})"
+                    )
+                if not recipients:
+                    missing.append(
+                        f"recipients (or one of: {', '.join(_ENV_FALLBACKS['smtp_recipients'])})"
+                    )
+                if missing:
+                    raise ConfigError(
+                        f"{label}: email notifier is missing required field(s): "
+                        f"{'; '.join(missing)}."
+                    )
                 from flow_doctor.notify.email import EmailNotifier
                 notifiers.append(EmailNotifier(
-                    sender=nc.sender,
-                    recipients=nc.recipients,
+                    sender=sender,
+                    recipients=recipients,
                     smtp_host=nc.smtp_host,
                     smtp_port=nc.smtp_port,
-                    smtp_password=nc.smtp_password,
+                    smtp_password=password,
                 ))
+
             elif nc.type == "github":
-                repo = nc.repo or config.repo
-                token = nc.token or (config.github.token if config.github else None)
-                if repo and token:
-                    from flow_doctor.notify.github import GitHubNotifier
-                    labels = nc.labels or (config.github.labels if config.github else ["flow-doctor"])
-                    notifiers.append(GitHubNotifier(repo=repo, token=token, labels=labels))
+                repo = nc.repo or config.repo or _env_fallback("github_repo")
+                token = (
+                    nc.token
+                    or (config.github.token if config.github else None)
+                    or _env_fallback("github_token")
+                )
+                missing = []
+                if not repo:
+                    missing.append(
+                        f"repo (or one of: {', '.join(_ENV_FALLBACKS['github_repo'])})"
+                    )
+                if not token:
+                    missing.append(
+                        f"token (or one of: {', '.join(_ENV_FALLBACKS['github_token'])})"
+                    )
+                if missing:
+                    raise ConfigError(
+                        f"{label}: github notifier is missing required field(s): "
+                        f"{'; '.join(missing)}. "
+                        f"The token must have Issues: write permission on the target repo."
+                    )
+                from flow_doctor.notify.github import GitHubNotifier
+                labels = nc.labels or (config.github.labels if config.github else ["flow-doctor"])
+                notifiers.append(GitHubNotifier(repo=repo, token=token, labels=labels))
+
+            else:
+                raise ConfigError(
+                    f"{label}: unknown notifier type '{nc.type}'. "
+                    f"Supported types: slack, email, github."
+                )
+
         return notifiers
 
     def _init_diagnosis(self, config: FlowDoctorConfig) -> None:
@@ -456,10 +563,21 @@ class FlowDoctor:
         is_cascade: bool,
         diagnosis: Optional[Diagnosis] = None,
     ) -> None:
-        """Send notifications, respecting rate limits."""
+        """Send notifications, respecting rate limits.
+
+        Failures are logged at CRITICAL via the ``flow_doctor`` logger so
+        they surface in the host app's log stream (journalctl, Sentry,
+        Datadog, etc.) instead of only printing to stderr. An aggregate
+        CRITICAL is emitted if *all* notifiers failed for this report,
+        which is the "flow-doctor itself is broken" signal users most
+        need to see.
+        """
         # Warnings don't trigger alerts by default
         if report.severity == Severity.WARNING.value:
             return
+
+        attempted = 0
+        failed: List[str] = []
 
         for notifier in self._notifiers:
             from flow_doctor.notify.slack import SlackNotifier
@@ -488,6 +606,8 @@ class FlowDoctor:
                 self._store.save_action(action)
                 continue
 
+            attempted += 1
+
             # Send
             try:
                 success = notifier.send(report, self.config.flow_name, diagnosis)
@@ -498,8 +618,19 @@ class FlowDoctor:
                     diagnosis_id=diagnosis.id if diagnosis else None,
                 )
                 self._store.save_action(action)
+                if not success:
+                    failed.append(action_type)
+                    _logger.critical(
+                        "flow-doctor notifier %s returned failure for report %s "
+                        "(notifier-specific reason logged separately)",
+                        action_type, report.id,
+                    )
             except Exception as e:
-                print(f"[flow-doctor] Notification error: {e}", file=sys.stderr)
+                failed.append(action_type)
+                _logger.critical(
+                    "flow-doctor notifier %s raised while sending report %s: %s",
+                    action_type, report.id, e, exc_info=True,
+                )
                 action = Action(
                     report_id=report.id,
                     action_type=action_type,
@@ -507,6 +638,16 @@ class FlowDoctor:
                     diagnosis_id=diagnosis.id if diagnosis else None,
                 )
                 self._store.save_action(action)
+
+        # Aggregate signal: all notifiers failed for this report. This is
+        # the "error monitoring is itself broken" case — users MUST see it.
+        if attempted > 0 and len(failed) == attempted:
+            _logger.critical(
+                "flow-doctor: ALL %d notifier(s) failed for report %s (%s). "
+                "Error monitoring is currently broken — check flow-doctor "
+                "configuration and notifier credentials.",
+                attempted, report.id, ", ".join(failed),
+            )
 
     @contextmanager
     def guard(self):
@@ -708,16 +849,32 @@ class FlowDoctor:
 
 def init(
     config_path: Optional[str] = None,
+    *,
+    strict: bool = True,
     **kwargs: Any,
 ) -> FlowDoctor:
     """Initialize Flow Doctor.
 
     Args:
-        config_path: Path to a flow-doctor.yaml config file.
-        **kwargs: Inline config overrides (flow_name, repo, owner, notify, store, etc.)
+        config_path: Path to a flow-doctor.yaml config file. Optional —
+            flow-doctor can run with zero config files if all required
+            settings are provided via FLOW_DOCTOR_* environment variables
+            and/or ``**kwargs``.
+        strict: If True (default), any configuration or initialization
+            error raises immediately. If False, errors are logged and
+            flow-doctor runs in degraded mode with no notifiers. Strict
+            mode is the default because silent degradation defeats the
+            purpose of an error-monitoring tool.
+        **kwargs: Inline config overrides (flow_name, repo, owner, notify,
+            store, etc.)
 
     Returns:
         A configured FlowDoctor instance.
+
+    Raises:
+        ConfigError: When config is invalid, a notifier is missing required
+            fields, or a ``${VAR}`` reference cannot be resolved. Only
+            raised when ``strict=True`` (the default).
     """
     config = load_config(config_path=config_path, **kwargs)
-    return FlowDoctor(config)
+    return FlowDoctor(config, strict=strict)

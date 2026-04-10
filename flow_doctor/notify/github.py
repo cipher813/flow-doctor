@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from typing import List, Optional
 from urllib.error import URLError
@@ -10,6 +11,8 @@ from urllib.request import Request, urlopen
 
 from flow_doctor.core.models import Diagnosis, Report
 from flow_doctor.notify.base import Notifier
+
+_logger = logging.getLogger("flow_doctor")
 
 
 class GitHubNotifier(Notifier):
@@ -54,8 +57,21 @@ class GitHubNotifier(Notifier):
                 method="POST",
             )
             with urlopen(req, timeout=15) as resp:
-                return resp.status == 201
+                if resp.status == 201:
+                    return True
+                _logger.critical(
+                    "flow-doctor GitHub issue creation returned HTTP %s for repo %s",
+                    resp.status, self.repo,
+                )
+                return False
         except Exception as e:
+            # Log via Python logging at CRITICAL so host apps see it in their
+            # log stream (journalctl/Sentry/Datadog). Also keep the stderr
+            # print for shells without structured logging configured.
+            _logger.critical(
+                "flow-doctor GitHub issue creation failed for repo %s: %s",
+                self.repo, e, exc_info=True,
+            )
             print(f"[flow-doctor] GitHub issue creation failed: {e}", file=sys.stderr)
             return False
 
