@@ -30,3 +30,6 @@ tmp*.db
 *-design.md
 
 .gitleaksbaseline.json
+
+# Local-only automation scripts (e.g. publish.sh) — not distributed with the package
+scripts/
