@@ -2,16 +2,21 @@
 
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-218_passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-243_passing-brightgreen.svg)]()
 [![Coverage](https://img.shields.io/badge/coverage-81%25-brightgreen.svg)]()
-[![PyPI](https://img.shields.io/badge/PyPI-v0.1.0-blue.svg)](https://pypi.org/project/flow-doctor/)
+[![PyPI](https://img.shields.io/badge/PyPI-v0.2.0-blue.svg)](https://pypi.org/project/flow-doctor/)
 
 Pipeline error handler for Python. Captures exceptions, diagnoses root causes with LLMs, files GitHub issues, and generates fix PRs.
 
+**Fail-loud by default (v0.2.0+).** Configuration errors — missing tokens, unresolved `${VAR}` references, misconfigured notifiers — raise `ConfigError` at `init()` time instead of silently degrading. Silent degradation means users discover broken error monitoring only during an actual incident, which defeats the purpose.
+
 ```python
+import logging
 import flow_doctor
 
-fd = flow_doctor.init(config_path="flow-doctor.yaml")
+# Zero config file: read everything from FLOW_DOCTOR_* env vars
+fd = flow_doctor.init()
+
 handler = flow_doctor.FlowDoctorHandler(fd, level=logging.WARNING)
 logging.getLogger().addHandler(handler)
 
@@ -148,7 +153,7 @@ auto_fix:
     deny: ["*.yaml", "*.yml"]
 ```
 
-Environment variables in `${VAR}` syntax are resolved at load time.
+Environment variables in `${VAR}` syntax are resolved at load time. **Unresolved references raise `ConfigError`** — no silent passthrough where `${MISSING_VAR}` ends up being used as a literal token.
 
 Inline configuration (no YAML file):
 
@@ -159,6 +164,59 @@ fd = flow_doctor.init(
     store={"type": "sqlite", "path": "flow_doctor.db"},
     notify=["github:owner/repo"],
 )
+```
+
+## Environment Variables
+
+flow-doctor reads credentials from environment variables as its primary configuration mechanism. Every notifier has a documented fallback chain: config → `FLOW_DOCTOR_*` canonical name → common conventions. This lets the same code work across `export`-in-shell, systemd `EnvironmentFile=`, Docker `--env`, Kubernetes Secrets, CI runners, Render/Fly.io/Heroku, and everything else, without touching a file.
+
+### Canonical contract
+
+| Variable | Used by | Fallback chain | Required when |
+|---|---|---|---|
+| `FLOW_DOCTOR_GITHUB_TOKEN` | GitHub notifier, auto-fix PR creator | `FLOW_DOCTOR_GITHUB_TOKEN` → `GH_TOKEN` → `GITHUB_TOKEN` | Any GitHub notifier or auto-fix is configured |
+| `FLOW_DOCTOR_GITHUB_REPO` | GitHub notifier | `FLOW_DOCTOR_GITHUB_REPO` | GitHub notifier config has no explicit `repo` field |
+| `FLOW_DOCTOR_SMTP_PASSWORD` | Email notifier | `FLOW_DOCTOR_SMTP_PASSWORD` → `GMAIL_APP_PASSWORD` | SMTP requires auth |
+| `FLOW_DOCTOR_SMTP_SENDER` | Email notifier | `FLOW_DOCTOR_SMTP_SENDER` → `EMAIL_SENDER` | Email notifier config has no explicit `sender` field |
+| `FLOW_DOCTOR_SMTP_RECIPIENTS` | Email notifier | `FLOW_DOCTOR_SMTP_RECIPIENTS` → `EMAIL_RECIPIENTS` | Email notifier config has no explicit `recipients` field |
+| `FLOW_DOCTOR_SLACK_WEBHOOK` | Slack notifier | `FLOW_DOCTOR_SLACK_WEBHOOK` → `SLACK_WEBHOOK_URL` | Slack notifier config has no explicit `webhook_url` field |
+| `FLOW_DOCTOR_ANTHROPIC_API_KEY` | LLM diagnosis, auto-fix generator | `FLOW_DOCTOR_ANTHROPIC_API_KEY` → `ANTHROPIC_API_KEY` | `diagnosis.enabled: true` or auto-fix is on |
+
+**Precedence** for every field is: explicit value in YAML/kwargs → canonical `FLOW_DOCTOR_*` env var → convention fallbacks in the order listed. The first non-empty value wins. Missing values raise `ConfigError` at `init()` time naming the specific field and the env vars that would satisfy it.
+
+### Env-var-only quickstart
+
+For the minimum possible setup, create a GitHub PAT with `Issues: Read and write`, then:
+
+```bash
+export FLOW_DOCTOR_GITHUB_REPO=myorg/myrepo
+export FLOW_DOCTOR_GITHUB_TOKEN=github_pat_...
+```
+
+```python
+import flow_doctor
+
+fd = flow_doctor.init(
+    flow_name="my-pipeline",
+    notify=[{"type": "github"}],
+)
+
+try:
+    risky_thing()
+except Exception as e:
+    fd.report(e)
+```
+
+Two env vars, four lines of Python, working GitHub issues on the next exception. No YAML file required. The GitHub notifier's `repo` and `token` both resolve from the env.
+
+### Strict mode and degraded mode
+
+`flow_doctor.init()` defaults to `strict=True`. Any configuration error (missing required field, unresolved `${VAR}`, unknown notifier type) raises `ConfigError` and prevents startup. This is the recommended default — a non-running flow-doctor is a loud failure; a silently-degraded flow-doctor is a silent one.
+
+If you genuinely want best-effort init that logs errors but keeps running with no notifiers, opt in explicitly:
+
+```python
+fd = flow_doctor.init(strict=False)  # degraded mode — use with caution
 ```
 
 ## Features
