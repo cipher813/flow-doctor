@@ -265,6 +265,7 @@ class FlowDoctor:
                 fix_pr_min_confidence=config.remediation.fix_pr_min_confidence,
                 max_auto_remediations_per_day=config.remediation.max_auto_remediations_per_day,
                 max_auto_remediations_per_failure=config.remediation.max_auto_remediations_per_failure,
+                deny_repos=list(config.remediation.deny_repos),
             )
             if not config.remediation.market_hours_lockout:
                 gate_config.market_open_hour = 0

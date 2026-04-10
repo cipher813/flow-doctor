@@ -87,13 +87,33 @@ class RemediationConfig:
     enabled: bool = False
     dry_run: bool = True  # Log actions without executing
     auto_remediate_min_confidence: float = 0.9
-    fix_pr_min_confidence: float = 0.8
-    max_auto_remediations_per_day: int = 5
+    # Raised from 0.8 → 0.85 in the conservative-defaults revision. The
+    # 0.8 threshold was letting through fixes the LLM was only marginally
+    # confident about, which produced PRs that humans had to spend effort
+    # rejecting. 0.85 keeps the feature useful while cutting false-positive
+    # PR volume. Consumers can override per-install in flow-doctor.yaml
+    # if they want to be even more conservative (e.g., 0.9).
+    fix_pr_min_confidence: float = 0.85
+    # Raised from 5 → 2. The original 5/day default was calibrated for
+    # a high-volume CI environment where fixes are usually dependency
+    # bumps and lint autofixes. For application code, 2/day leaves
+    # meaningful headroom for the LLM to propose fixes while keeping
+    # review bandwidth manageable — at 5/day a single bad day could
+    # produce 25 PRs in a work week, which is a PR-fatigue recipe.
+    max_auto_remediations_per_day: int = 2
     max_auto_remediations_per_failure: int = 2
     market_hours_lockout: bool = True
     telegram_webhook_url: Optional[str] = None
     s3_audit_bucket: Optional[str] = None
     s3_audit_prefix: str = "flow-doctor/audit"
+    # Hard deny list. Repos on this list will NEVER have auto-fix
+    # applied, even if remediation.enabled=True and the LLM confidence
+    # exceeds thresholds. Use for production-critical repos where a
+    # bad auto-fix could cost real money or safety (trading systems,
+    # payment processors, medical software). Issue-filing still works
+    # for these repos — only code modifications are blocked. Matches
+    # GitHub-style "owner/name" or bare "name" (case-insensitive).
+    deny_repos: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -349,17 +369,36 @@ def load_config(
     rem_raw = raw.get("remediation", {})
     if isinstance(rem_raw, dict):
         rem_raw = _resolve_dict(rem_raw)
+        # Defaults here match the RemediationConfig dataclass defaults
+        # (not inlined) so there's one source of truth. If you change a
+        # default, change it in the dataclass at the top of this file.
+        _defaults = RemediationConfig()
+        deny_repos_raw = rem_raw.get("deny_repos", [])
+        if isinstance(deny_repos_raw, str):
+            # Allow a single string for the common one-repo case
+            deny_repos_raw = [deny_repos_raw]
         remediation_config = RemediationConfig(
-            enabled=rem_raw.get("enabled", False),
-            dry_run=rem_raw.get("dry_run", True),
-            auto_remediate_min_confidence=float(rem_raw.get("auto_remediate_min_confidence", 0.9)),
-            fix_pr_min_confidence=float(rem_raw.get("fix_pr_min_confidence", 0.8)),
-            max_auto_remediations_per_day=int(rem_raw.get("max_auto_remediations_per_day", 5)),
-            max_auto_remediations_per_failure=int(rem_raw.get("max_auto_remediations_per_failure", 2)),
-            market_hours_lockout=rem_raw.get("market_hours_lockout", True),
+            enabled=rem_raw.get("enabled", _defaults.enabled),
+            dry_run=rem_raw.get("dry_run", _defaults.dry_run),
+            auto_remediate_min_confidence=float(
+                rem_raw.get("auto_remediate_min_confidence",
+                            _defaults.auto_remediate_min_confidence)),
+            fix_pr_min_confidence=float(
+                rem_raw.get("fix_pr_min_confidence",
+                            _defaults.fix_pr_min_confidence)),
+            max_auto_remediations_per_day=int(
+                rem_raw.get("max_auto_remediations_per_day",
+                            _defaults.max_auto_remediations_per_day)),
+            max_auto_remediations_per_failure=int(
+                rem_raw.get("max_auto_remediations_per_failure",
+                            _defaults.max_auto_remediations_per_failure)),
+            market_hours_lockout=rem_raw.get(
+                "market_hours_lockout", _defaults.market_hours_lockout),
             telegram_webhook_url=rem_raw.get("telegram_webhook_url"),
             s3_audit_bucket=rem_raw.get("s3_audit_bucket"),
-            s3_audit_prefix=rem_raw.get("s3_audit_prefix", "flow-doctor/audit"),
+            s3_audit_prefix=rem_raw.get(
+                "s3_audit_prefix", _defaults.s3_audit_prefix),
+            deny_repos=list(deny_repos_raw),
         )
     else:
         remediation_config = RemediationConfig()

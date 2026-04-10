@@ -44,15 +44,23 @@ class Decision:
 @dataclass
 class GateConfig:
     """Configuration for the decision gate."""
-    # Confidence thresholds
+    # Confidence thresholds. Raised in the conservative-defaults revision
+    # (fix_pr_min_confidence 0.8 → 0.85) to cut false-positive PR volume.
     auto_remediate_min_confidence: float = 0.9
-    fix_pr_min_confidence: float = 0.8
+    fix_pr_min_confidence: float = 0.85
     # Market hours lockout (ET)
     market_open_hour: int = 9   # 9:30 AM ET
     market_close_hour: int = 16  # 4:00 PM ET
-    # Retry limits
-    max_auto_remediations_per_day: int = 5
+    # Retry limits. max_auto_remediations_per_day lowered 5 → 2 in the
+    # conservative-defaults revision to keep review bandwidth manageable.
+    max_auto_remediations_per_day: int = 2
     max_auto_remediations_per_failure: int = 2
+    # Hard deny list. Repos on this list will NEVER have auto-fix applied.
+    # Matched against the flow_name OR repo field on the diagnosis/report
+    # in a case-insensitive substring check, so both "owner/repo" and
+    # bare "repo" work. Issue-filing for these repos still works — only
+    # code modifications (auto_remediate, generate_fix_pr) are blocked.
+    deny_repos: List[str] = field(default_factory=list)
     # Categories eligible for auto-remediation
     auto_remediable_categories: List[str] = field(
         default_factory=lambda: ["INFRA", "CONFIG", "TRANSIENT", "DATA"]
@@ -92,7 +100,29 @@ class DecisionGate:
         # 1. Check for playbook match
         playbook_match = self.playbook.match(error_type, error_message, flow_name)
 
-        # 2. Route based on confidence and category
+        # 2. Hard deny list — block ALL code modifications (auto-remediate +
+        # fix PR generation) for repos on the deny list. This is the last
+        # line of defense for production-critical repos where a bad fix
+        # could cost real money or safety. Issue-filing still works for
+        # these repos because this check only gates the auto-fix path.
+        denied = self._check_deny_repo(diagnosis, flow_name)
+        if denied:
+            logger.info(
+                "decision_gate: repo %s is on the deny list — escalating "
+                "to human instead of auto-remediating / generating PR",
+                denied,
+            )
+            return Decision(
+                decision_type=DecisionType.ESCALATE,
+                reason=(
+                    f"Repo '{denied}' is on the remediation deny list. "
+                    f"Auto-fix is disabled for this repo."
+                ),
+                diagnosis=diagnosis,
+                playbook_match=playbook_match,
+            )
+
+        # 3. Route based on confidence and category
         if diagnosis.confidence >= self.config.auto_remediate_min_confidence:
             if diagnosis.category in self.config.auto_remediable_categories:
                 return self._try_auto_remediate(diagnosis, playbook_match)
@@ -120,6 +150,43 @@ class DecisionGate:
             diagnosis=diagnosis,
             playbook_match=playbook_match,
         )
+
+    def _check_deny_repo(
+        self,
+        diagnosis: Diagnosis,
+        flow_name: Optional[str],
+    ) -> Optional[str]:
+        """Check if the diagnosis's repo is on the deny list.
+
+        Returns the matched deny-list entry if blocked, or None if the
+        repo is allowed to proceed. Match is case-insensitive substring,
+        so both ``owner/repo`` and bare ``repo`` formats work.
+
+        Looks at multiple sources for the repo name:
+        1. diagnosis.context.get('repo') if the diagnosis set it
+        2. flow_name (common pattern: flow_name includes repo name)
+        3. diagnosis.flow_name
+        """
+        if not self.config.deny_repos:
+            return None
+
+        haystacks: List[str] = []
+        # Diagnosis may carry repo explicitly in context
+        ctx = getattr(diagnosis, "context", None)
+        if isinstance(ctx, dict) and "repo" in ctx:
+            haystacks.append(str(ctx["repo"]))
+        if flow_name:
+            haystacks.append(flow_name)
+        diag_flow = getattr(diagnosis, "flow_name", None)
+        if diag_flow:
+            haystacks.append(diag_flow)
+
+        for deny in self.config.deny_repos:
+            deny_lc = deny.lower()
+            for hay in haystacks:
+                if deny_lc in hay.lower():
+                    return deny
+        return None
 
     def _get_daily_remediation_count(self) -> int:
         """Get today's remediation count — persistent (SQLite) or in-memory."""

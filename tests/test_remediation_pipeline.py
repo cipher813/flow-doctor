@@ -295,6 +295,12 @@ class TestFullPipeline:
             playbook=test_playbook,
             config=GateConfig(
                 market_open_hour=0, market_close_hour=0,
+                # This integration test exercises 3+ auto-remediation
+                # decisions back-to-back. The default cap was lowered
+                # 5 → 2 in the conservative-defaults revision; raise it
+                # for this test so the routing logic is under test
+                # rather than the rate limit.
+                max_auto_remediations_per_day=10,
             ),
         )
 
