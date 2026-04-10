@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from typing import Optional
 from urllib.request import Request, urlopen
@@ -10,6 +11,8 @@ from urllib.error import URLError
 
 from flow_doctor.core.models import Diagnosis, Report
 from flow_doctor.notify.base import Notifier
+
+_logger = logging.getLogger("flow_doctor")
 
 
 class SlackNotifier(Notifier):
@@ -39,8 +42,16 @@ class SlackNotifier(Notifier):
                 method="POST",
             )
             with urlopen(req, timeout=10) as resp:
-                return resp.status == 200
+                if resp.status == 200:
+                    return True
+                _logger.critical(
+                    "flow-doctor Slack webhook returned HTTP %s", resp.status,
+                )
+                return False
         except Exception as e:
+            _logger.critical(
+                "flow-doctor Slack notification failed: %s", e, exc_info=True,
+            )
             print(f"[flow-doctor] Slack notification failed: {e}", file=sys.stderr)
             return False
 

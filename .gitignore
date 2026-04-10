@@ -22,6 +22,8 @@ build/
 
 # pytest
 .pytest_cache/
+pytest-of-*/
+tmp*.db
 
 # Design docs (local only)
 *-design-*.md

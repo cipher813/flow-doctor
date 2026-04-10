@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from flow_doctor.core.errors import ConfigError
+
 
 @dataclass
 class NotifyChannelConfig:
@@ -123,22 +125,52 @@ class FlowDoctorConfig:
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 
 
-def _resolve_env_vars(value: str) -> str:
-    """Replace ${VAR_NAME} with the environment variable value."""
+def _resolve_env_vars(value: str, *, allow_unresolved: bool = False) -> str:
+    """Replace ``${VAR_NAME}`` with the environment variable value.
+
+    By default (``allow_unresolved=False``), raises ``ConfigError`` if any
+    referenced variable is missing from the environment. This turns YAML
+    config bugs into immediate, loud failures instead of silent passthroughs
+    where the literal string ``${VAR_NAME}`` ends up being used as a token.
+
+    ``allow_unresolved=True`` preserves the old silent-passthrough behavior
+    and exists only for unit tests that want to exercise partial-resolution
+    paths without setting real env vars.
+    """
+    missing: List[str] = []
+
     def _replacer(match: re.Match) -> str:
         var_name = match.group(1)
-        return os.environ.get(var_name, match.group(0))
-    return _ENV_VAR_RE.sub(_replacer, value)
+        resolved = os.environ.get(var_name)
+        if resolved is None:
+            if allow_unresolved:
+                return match.group(0)
+            missing.append(var_name)
+            return match.group(0)
+        return resolved
+
+    result = _ENV_VAR_RE.sub(_replacer, value)
+
+    if missing and not allow_unresolved:
+        unique_missing = sorted(set(missing))
+        names = ", ".join(unique_missing)
+        raise ConfigError(
+            f"Unresolved environment variable(s) in flow-doctor config: {names}. "
+            f"Set these in the process environment before calling flow_doctor.init(). "
+            f"See the FLOW_DOCTOR_* env var contract in the README."
+        )
+
+    return result
 
 
-def _resolve_dict(d: Any) -> Any:
+def _resolve_dict(d: Any, *, allow_unresolved: bool = False) -> Any:
     """Recursively resolve env vars in a dict/list/string."""
     if isinstance(d, str):
-        return _resolve_env_vars(d)
+        return _resolve_env_vars(d, allow_unresolved=allow_unresolved)
     if isinstance(d, dict):
-        return {k: _resolve_dict(v) for k, v in d.items()}
+        return {k: _resolve_dict(v, allow_unresolved=allow_unresolved) for k, v in d.items()}
     if isinstance(d, list):
-        return [_resolve_dict(item) for item in d]
+        return [_resolve_dict(item, allow_unresolved=allow_unresolved) for item in d]
     return d
 
 
