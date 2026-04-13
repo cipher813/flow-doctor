@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Dedup signatures for non-exception string reports now normalize
+  variable identifiers (reqId/orderId/permId/clientId/conId, IB contract
+  symbol/localSymbol/tradingClass/exchange/primaryExchange/currency/secType,
+  UUIDs, AWS request IDs) before hashing. Previously a library that logged
+  the same error against many objects — e.g. ib_insync emitting
+  `Error 10197 ... reqId=257 ... symbol='D'`, `reqId=261 ... 'LLY'`,
+  `reqId=253 ... 'CASY'` for what is operationally a single "competing
+  live session" incident — produced a unique signature per message and
+  the cooldown window never engaged. Error codes and other semantic
+  numbers are preserved so distinct incidents remain distinct.
+
 ## 0.3.0 (2026-04-10)
 
 Two independent changes folded into one release because 0.2.0 was the

@@ -6,6 +6,8 @@ from flow_doctor.core.dedup import (
     DedupChecker,
     compute_error_signature,
     compute_signature_from_exception,
+    compute_signature_from_message,
+    normalize_message_for_signature,
 )
 from flow_doctor.core.models import Report
 from flow_doctor.storage.sqlite import SQLiteStorage
@@ -93,6 +95,65 @@ def test_dedup_checker_finds_duplicate():
         is_dup, existing_id = checker.is_duplicate("sig123")
         assert is_dup is True
         assert existing_id == report.id
+
+
+# Real IB error fixtures captured from alpha-engine on 2026-04-13.
+# Three back-to-back emails were sent for what is operationally one incident
+# (IB Gateway "competing live session" for different contracts).
+_IB_10197_D = (
+    "Error 10197, reqId 257: No market data during competing live session, "
+    "contract: Stock(conId=6327, symbol='D', exchange='SMART', "
+    "primaryExchange='NYSE', currency='USD', localSymbol='D', "
+    "tradingClass='D')"
+)
+_IB_10197_LLY = (
+    "Error 10197, reqId 261: No market data during competing live session, "
+    "contract: Stock(conId=9160, symbol='LLY', exchange='SMART', "
+    "primaryExchange='NYSE', currency='USD', localSymbol='LLY', "
+    "tradingClass='LLY')"
+)
+_IB_10197_CASY = (
+    "Error 10197, reqId 253: No market data during competing live session, "
+    "contract: Stock(conId=267265, symbol='CASY', exchange='SMART', "
+    "primaryExchange='NASDAQ', currency='USD', localSymbol='CASY', "
+    "tradingClass='CASY')"
+)
+
+
+def test_normalize_strips_ib_contract_identifiers():
+    """IB 10197 errors that differ only by reqId/conId/symbol normalize identically."""
+    n1 = normalize_message_for_signature(_IB_10197_D)
+    n2 = normalize_message_for_signature(_IB_10197_LLY)
+    n3 = normalize_message_for_signature(_IB_10197_CASY)
+    assert n1 == n2 == n3
+    # Error code must survive normalization — we dedup per incident, not per family
+    assert "10197" in n1
+
+
+def test_normalize_preserves_distinct_error_codes():
+    """Different IB error codes must not collapse into the same signature."""
+    msg_10197 = "Error 10197, reqId 1: foo"
+    msg_200 = "Error 200, reqId 1: bar"
+    assert compute_signature_from_message(msg_10197) != compute_signature_from_message(msg_200)
+
+
+def test_signature_from_message_dedups_ib_fixtures():
+    """compute_signature_from_message collapses the three real IB 10197 messages."""
+    s1 = compute_signature_from_message(_IB_10197_D)
+    s2 = compute_signature_from_message(_IB_10197_LLY)
+    s3 = compute_signature_from_message(_IB_10197_CASY)
+    assert s1 == s2 == s3
+
+
+def test_normalize_uuids_and_request_ids():
+    """UUIDs and AWS-style request IDs normalize away."""
+    uuid_a = "failed: task 550e8400-e29b-41d4-a716-446655440000 timed out"
+    uuid_b = "failed: task 123e4567-e89b-12d3-a456-426614174000 timed out"
+    assert normalize_message_for_signature(uuid_a) == normalize_message_for_signature(uuid_b)
+
+    req_a = "S3 error request_id=ABC123DEF456 access denied"
+    req_b = "S3 error request_id=XYZ789QWE012 access denied"
+    assert normalize_message_for_signature(req_a) == normalize_message_for_signature(req_b)
 
 
 def test_dedup_increment():

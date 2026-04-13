@@ -13,7 +13,12 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from flow_doctor.core.config import FlowDoctorConfig, load_config
-from flow_doctor.core.dedup import DedupChecker, compute_error_signature, compute_signature_from_exception
+from flow_doctor.core.dedup import (
+    DedupChecker,
+    compute_error_signature,
+    compute_signature_from_exception,
+    compute_signature_from_message,
+)
 from flow_doctor.core.errors import ConfigError
 from flow_doctor.core.models import Action, ActionStatus, ActionType, Diagnosis, Report, Severity
 from flow_doctor.core.rate_limiter import CascadeDetector, RateLimiter
@@ -347,10 +352,12 @@ class FlowDoctor:
             error_message = str(error)
             error_signature = compute_error_signature(None, None)
 
-        # For non-exception string reports, use message content in the signature
+        # For non-exception string reports, normalize variable tokens
+        # (reqIds, conIds, contract symbols, UUIDs) before hashing so that
+        # repeated errors differing only in per-call identifiers collapse
+        # to one signature and the cooldown window actually engages.
         if error_type is None:
-            import hashlib
-            error_signature = hashlib.sha256(error_message.encode("utf-8")).hexdigest()[:16]
+            error_signature = compute_signature_from_message(error_message)
 
         # Attach captured logs
         captured_logs = logs

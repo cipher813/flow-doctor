@@ -3,12 +3,63 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import traceback as tb_module
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from flow_doctor.storage.base import StorageBackend
+
+
+# Patterns that strip variable-looking tokens from log messages so that
+# repeated errors differing only by request/correlation IDs collapse to one
+# signature. Error codes, HTTP statuses, and other semantically meaningful
+# numbers are preserved — only fields that are recognizably identifiers
+# (key=value form, quoted contract identifiers, UUIDs) are normalized.
+_NORMALIZE_PATTERNS: List[Tuple[re.Pattern, str]] = [
+    # ib_insync / trading identifiers
+    (re.compile(r"\breqId[=\s:]+\d+", re.IGNORECASE), "reqId=N"),
+    (re.compile(r"\borderId[=\s:]+\d+", re.IGNORECASE), "orderId=N"),
+    (re.compile(r"\bpermId[=\s:]+\d+", re.IGNORECASE), "permId=N"),
+    (re.compile(r"\bclientId[=\s:]+\d+", re.IGNORECASE), "clientId=N"),
+    (re.compile(r"\bconId=\d+"), "conId=N"),
+    # IB Contract repr fields: key='value' — collapse the quoted identifier
+    (re.compile(r"\b(symbol|localSymbol|tradingClass|exchange|primaryExchange|currency|secType)='[^']*'"),
+     r"\1=X"),
+    # UUIDs
+    (re.compile(
+        r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+        re.IGNORECASE,
+    ), "UUID"),
+    # AWS-style request IDs
+    (re.compile(r"\brequest[_\s]?id[=:\s]+[A-Za-z0-9\-]+", re.IGNORECASE), "request_id=N"),
+]
+
+
+def normalize_message_for_signature(message: str) -> str:
+    """Strip variable identifiers from a message so similar errors hash the same.
+
+    Preserves error codes and other semantically meaningful numbers. Only
+    normalizes tokens that look like request IDs, contract identifiers,
+    UUIDs, or similar per-call variables.
+    """
+    if not message:
+        return ""
+    normalized = message
+    for pattern, replacement in _NORMALIZE_PATTERNS:
+        normalized = pattern.sub(replacement, normalized)
+    return normalized
+
+
+def compute_signature_from_message(message: str) -> str:
+    """Compute a dedup signature from a plain log message.
+
+    Normalizes variable identifiers first so repeated errors with different
+    reqIds/conIds/symbols produce the same signature.
+    """
+    normalized = normalize_message_for_signature(message)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
 
 def compute_error_signature(
