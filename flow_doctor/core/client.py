@@ -98,6 +98,8 @@ class FlowDoctor:
         try:
             self._store = self._init_store(config)
             self._notifiers = self._init_notifiers(config)
+            for _n in self._notifiers:
+                _n.validate()
             self._dedup = DedupChecker(self._store, config.dedup_cooldown_minutes)
             self._rate_limiter = RateLimiter(self._store, config.rate_limits)
             self._cascade_detector = CascadeDetector(self._store)

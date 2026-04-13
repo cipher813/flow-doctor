@@ -35,3 +35,14 @@ class Notifier(ABC):
             success from failure, and use the value to construct follow-up
             links when it is non-empty.
         """
+
+    def validate(self) -> None:
+        """Lightweight auth/reachability preflight.
+
+        Called by ``FlowDoctor.__init__`` in strict mode so revoked tokens
+        and unreachable backends fail fast at startup instead of silently
+        dropping error reports later. Subclasses that can cheaply verify
+        their credentials (e.g., a GitHub ``GET /user`` call) should
+        override this and raise on auth failure. Default is no-op.
+        """
+        return None

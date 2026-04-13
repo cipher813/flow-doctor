@@ -28,6 +28,53 @@ class GitHubNotifier(Notifier):
         self.token = token
         self.labels = labels or ["flow-doctor"]
 
+    def validate(self) -> None:
+        """Preflight: confirm token is valid via ``GET /user``.
+
+        Raises ``RuntimeError`` on 401/403 so revoked or missing-scope PATs
+        fail at FlowDoctor init time. Other errors (network, 5xx) are
+        non-fatal — reported to the logger but don't block init, since
+        transient GitHub issues shouldn't prevent app startup.
+
+        Skips the network call entirely when
+        ``FLOW_DOCTOR_SKIP_PREFLIGHT=1`` is set in the environment — for
+        test suites that construct notifiers with fake tokens and for
+        air-gapped environments that can't reach api.github.com.
+        """
+        import os
+        if os.environ.get("FLOW_DOCTOR_SKIP_PREFLIGHT") == "1":
+            return
+        try:
+            req = Request(
+                "https://api.github.com/user",
+                headers={
+                    "Authorization": f"token {self.token}",
+                    "Accept": "application/vnd.github.v3+json",
+                },
+                method="GET",
+            )
+            with urlopen(req, timeout=10) as resp:
+                if resp.status == 200:
+                    return
+                _logger.warning(
+                    "flow-doctor GitHub preflight returned HTTP %s (non-401, proceeding)",
+                    resp.status,
+                )
+        except URLError as e:
+            reason = getattr(e, "reason", e)
+            code = getattr(e, "code", None)
+            if code in (401, 403):
+                raise RuntimeError(
+                    f"flow-doctor GitHub token rejected by api.github.com "
+                    f"(HTTP {code}). Check FLOW_DOCTOR_GITHUB_TOKEN (or "
+                    f"GITHUB_TOKEN) — it may be revoked, expired, or missing "
+                    f"the 'repo' scope for {self.repo}."
+                ) from e
+            _logger.warning(
+                "flow-doctor GitHub preflight non-auth error (proceeding): %s",
+                reason,
+            )
+
     def send(
         self,
         report: Report,
