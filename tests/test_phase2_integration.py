@@ -231,6 +231,13 @@ def test_digest_generation():
     with tempfile.NamedTemporaryFile(suffix=".db") as f:
         config = _make_config(f.name)
         config.rate_limits.max_alerts_per_day = 0  # Force all to degrade
+        # This test asserts the DIGEST summarises degraded actions, so it needs
+        # actions to actually degrade. Failure severities are exempt from the
+        # daily cap by default (a limiter that can drop a failure page is an
+        # outage amplifier — see RateLimiter.check), and the errors reported
+        # below are error-severity, so without this the cap never applies and
+        # there is nothing to digest.
+        config.rate_limits.rate_limit_exempt_severities = []
 
         config.notify = [
             NotifyChannelConfig(
