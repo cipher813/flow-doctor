@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from flow_doctor.core.constants import DEFAULT_DIAGNOSIS_MODEL
 from flow_doctor.core.errors import ConfigError
+from flow_doctor.core.models import Severity
 
 
 class _ConfigModel(BaseModel):
@@ -130,6 +131,15 @@ class RateLimitConfig(_ConfigModel):
     daily_digest: bool = True
     digest_time: str = "17:00"
     dedup_cooldown_minutes: int = 60
+    # Severities exempt from the daily alert cap. A rate limiter that can drop
+    # a failure page is an outage amplifier, not a limiter: repeats of the SAME
+    # failure are already suppressed by signature dedup and
+    # ``dedup_cooldown_minutes``, so the daily cap only ever fires on DISTINCT
+    # failures — exactly the ones worth seeing. Set to [] to cap every
+    # severity (the pre-0.8.8 behaviour).
+    rate_limit_exempt_severities: List[str] = Field(
+        default_factory=lambda: [Severity.CRITICAL.value, Severity.ERROR.value]
+    )
 
 
 class DiagnosisConfig(_ConfigModel):
@@ -467,6 +477,10 @@ def load_config(
             digest_time=rl_raw.get("digest_time", "17:00"),
             dedup_cooldown_minutes=rl_raw.get("dedup_cooldown_minutes",
                                                raw.get("dedup_cooldown_minutes", 60)),
+            rate_limit_exempt_severities=rl_raw.get(
+                "rate_limit_exempt_severities",
+                [Severity.CRITICAL.value, Severity.ERROR.value],
+            ),
         )
 
     dedup_cooldown = raw.get("dedup_cooldown_minutes", rate_limits.dedup_cooldown_minutes)

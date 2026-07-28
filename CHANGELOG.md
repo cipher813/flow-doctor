@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.8 (2026-07-28)
+
+### Fixed
+
+- **`telegram_alert` and `s3_alert` had no rate-limit budget and silently inherited a hardcoded 10/day, causing a fleet-wide alert blackout.** `RateLimiter.__init__` mapped budgets for `diagnosis`, `github_issue`, `github_pr`, `slack_alert` and `email_alert` only; `check()` then did `self.limits.get(action, 10)`. Both notifiers shipped without being added, so a consumer configuring `max_alerts_per_day: 100` had that value reach only Slack and email — channels it did not use — while Telegram, the only channel anyone read, took the hardcoded 10/day, counted via `count_actions_today` against a store SHARED by every consumer. The budget burned out early each day, so terminal notifications (which happen late in a cycle) were systematically dropped while start-of-run pings got through. Measured in production 2026-07-28: **12 of 13 terminal Step-Functions notifications suppressed across two days, all with distinct signatures — including two consecutive trading-pipeline failures that paged and were never seen** (nousergon/alpha-engine-config#5289). Budgets are now derived from the `ActionType` enum, so a newly-added notifier cannot be silently unbudgeted, and the constructor warns if any `ActionType` lacks one.
+
+- **An unmapped action no longer falls back to a silent small default.** `check()` previously invented a `10`/day budget for any action not in the map — the generative defect above. It now **fails open** (allows) and logs a warning naming the gap. For an alerting library this is the correct failure direction: an extra alert costs noise, a dropped one costs an outage.
+
+### Added
+
+- **`RateLimitConfig.rate_limit_exempt_severities`** (default `["critical", "error"]`) — severities exempt from the daily alert cap, threaded from `Report.severity` through `FlowDoctor._send_notifications` into `RateLimiter.check(action, severity=...)`. A rate limiter that can drop a failure page is an outage amplifier rather than a limiter: repeats of the *same* failure are already suppressed by signature dedup and `dedup_cooldown_minutes`, so anything reaching the daily cap at error/critical is a *distinct* failure — precisely what must not be silenced. Set to `[]` to restore the pre-0.8.8 cap-everything behaviour.
+
+  `RateLimiter.check()` gains an optional `severity` keyword. Existing positional calls (`check(action)`) are unaffected; a test double stubbing `check` must accept the new keyword.
+
+
 ## 0.8.6 (2026-07-21)
 
 ### Fixed
