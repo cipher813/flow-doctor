@@ -70,7 +70,9 @@ def test_severity_filtered_is_now_recorded(fd):
 def test_rate_limited_records_rate_limited(fd):
     fd._notifiers = [_RecordingNotifier()]
     # Force the limiter to degrade every dispatch.
-    fd._rate_limiter.check = lambda action: "degrade"
+    # Signature mirrors RateLimiter.check(action, severity=None) — the stub must
+    # accept the severity kwarg the client threads through (see rate_limiter.py).
+    fd._rate_limiter.check = lambda action, severity=None: "degrade"
     fd.report(ValueError("boom"))
     assert fd._store.decision_breakdown_today("decision-test") == {
         DecisionReason.RATE_LIMITED.value: 1

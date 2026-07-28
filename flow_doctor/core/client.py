@@ -1384,8 +1384,11 @@ class FlowDoctor:
             else:
                 action_type = "unknown_alert"
 
-            # Rate limit check
-            decision = self._rate_limiter.check(action_type)
+            # Rate limit check. Severity is threaded so a genuine failure page
+            # is never silenced by the blunt daily cap — repeats of the SAME
+            # failure are already suppressed by signature dedup upstream, so
+            # anything reaching here at error/critical is a DISTINCT failure.
+            decision = self._rate_limiter.check(action_type, severity=report.severity)
             if decision == "degrade":
                 action = Action(
                     report_id=report.id,
