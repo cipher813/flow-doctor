@@ -23,6 +23,9 @@ on:
   # Manual fallback for re-publishing if a main-push event was missed.
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build sdist + wheel
@@ -59,6 +62,7 @@ jobs:
     # OIDC trusted-publishing requires id-token: write at the job level.
     # No PYPI_API_TOKEN secret is used — PyPI verifies the workflow identity.
     permissions:
+      contents: read
       id-token: write
     environment:
       name: pypi
