@@ -18,7 +18,7 @@ name: Flow Doctor Fix (reusable)
 #         contents: write
 #         pull-requests: write
 #         issues: write
-#       uses: nousergon/flow-doctor/.github/workflows/fix.yml@c57db7c5bc39458167fb28375634e3e8f7dedac7
+#       uses: nousergon/flow-doctor/.github/workflows/fix.yml@c3ca52e
 #       secrets: inherit
 #
 # Cost is bounded upstream: flow-doctor.yaml caps issues at
