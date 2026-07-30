@@ -1223,13 +1223,22 @@ class FlowDoctor:
                     return None
 
             # 3. Assemble context and call LLM
-            git_context = self._load_git_context()
+            git_context = self._load_git_context(report)
             context = self._context_assembler.assemble(
                 report=report,
                 git_context=git_context,
             )
             diagnosis = self._diagnosis_provider.diagnose(context, self._context_assembler)
             diagnosis.report_id = report.id
+
+            # 3b. Post-hoc remediation guard for deploy-drift errors:
+            # if the LLM produced a remediation recommending a checkout
+            # of the older SHA (despite commit-range context), suppress
+            # the remediation text — confidently-wrong advice is worse
+            # than no advice.
+            diagnosis = self._guard_deploy_drift_remediation(
+                diagnosis, report.error_message
+            )
 
             # 4. Save diagnosis and record the action
             self._store.save_diagnosis(diagnosis)
@@ -1247,24 +1256,107 @@ class FlowDoctor:
             print(f"[flow-doctor] Diagnosis failed: {e}", file=sys.stderr)
             return None
 
-    def _load_git_context(self) -> Optional[dict]:
-        """Load git context for diagnosis, preferring local over GitHub API."""
+    def _load_git_context(self, report: Optional[Report] = None) -> Optional[dict]:
+        """Load git context for diagnosis, preferring local over GitHub API.
+
+        When the report contains a deploy-drift error (two SHAs), also
+        loads deterministic commit-range context so the LLM can determine
+        which SHA is newer before producing a remediation.
+        """
         try:
             from flow_doctor.diagnosis.git_context import GitContextLoader
 
             # Try local git first
             ctx = GitContextLoader.load_local()
-            if ctx:
-                return ctx
+            if ctx is None:
+                ctx = {}
 
             # Fall back to GitHub API if repo and token are configured
-            if self.config.repo and self.config.github and self.config.github.token:
-                return GitContextLoader.load_github(
+            if not ctx and self.config.repo and self.config.github and self.config.github.token:
+                ctx = GitContextLoader.load_github(
                     self.config.repo, self.config.github.token
                 )
+                if ctx is None:
+                    ctx = {}
+
+            # Detect deploy-drift errors: when the error message cites two
+            # SHAs, load deterministic commit-range context so the LLM
+            # never recommends checking out the older (broken) SHA.
+            if report and report.error_message and not ctx.get("sha_range_context"):
+                sha_range = GitContextLoader.detect_and_load_sha_range(
+                    report.error_message, repo_path="."
+                )
+                if sha_range:
+                    newer_short = sha_range["newer_sha"][:7]
+                    older_short = sha_range["older_sha"][:7]
+                    ctx["sha_range_context"] = (
+                        f"Commit range {older_short}..{newer_short}:\n"
+                        f"{sha_range['sha_range_log']}\n"
+                        f"VERIFIED: {newer_short} is the NEWER commit "
+                        f"(it contains all changes in {older_short} plus "
+                        f"the commits listed above). A checkout or deploy "
+                        f"command should target {newer_short}, never "
+                        f"{older_short}."
+                    )
+
+            return ctx if ctx else None
         except Exception:
-            pass
-        return None
+            return None
+
+    @staticmethod
+    def _guard_deploy_drift_remediation(
+        diagnosis: Diagnosis,
+        error_message: str,
+    ) -> Diagnosis:
+        """Post-hoc guard: suppress remediation text that recommends checking out
+        an older SHA in a deploy-drift error.
+
+        The LLM now receives deterministic commit-range context (injected by
+        :meth:`_load_git_context`) and the system prompt instructs it to never
+        recommend the older SHA.  This guard is the belt-and-suspenders: if the
+        model produces wrong-direction remediation despite that context, we
+        annotate it rather than delivering harmful instructions to a human.
+
+        Only fires for deploy-drift-shaped errors (≥2 SHAs in the message).
+        """
+        if not diagnosis.remediation:
+            return diagnosis
+
+        import re
+
+        sha_pattern = re.compile(r"\b([0-9a-f]{7,40})\b", re.IGNORECASE)
+        shas = sha_pattern.findall(error_message)
+        if len(shas) < 2:
+            return diagnosis
+
+        # If the remediation contains a ``git checkout`` referencing one of
+        # the SHAs from the error message, annotate the remediation.
+        remediation_lower = diagnosis.remediation.lower()
+        mentions_checkout = "git checkout" in remediation_lower
+
+        if not mentions_checkout:
+            return diagnosis
+
+        # Find which SHAs from the error appear in the remediation
+        cited_shas = [
+            s for s in shas
+            if s.lower() in remediation_lower
+        ]
+        if not cited_shas:
+            return diagnosis
+
+        safe_note = (
+            "\n\n[FLOW-DOCTOR POST-HOC GUARD] This remediation recommends a "
+            "git checkout of a specific SHA, but the error message names two "
+            "SHAs and flow-doctor could not deterministically verify which is "
+            "newer.  DO NOT follow the checkout command above without first "
+            "verifying the correct target SHA.  Run:\n"
+            "    git log --oneline <pinned_sha>..<checkout_sha>\n"
+            "to confirm the checkout target is the newer commit."
+        )
+
+        diagnosis.remediation = diagnosis.remediation + safe_note
+        return diagnosis
 
     def _run_remediation(self, report: Report, diagnosis: Diagnosis) -> None:
         """Run the decision gate and execute remediation if appropriate."""
