@@ -1,5 +1,8 @@
 name: Flow Doctor Fix (reusable)
 
+permissions:
+  contents: read
+
 # Reusable workflow that generates a fix PR for a flow-doctor-filed issue.
 #
 # Calling repos do NOT copy this logic — they add a ~13-line stub that
