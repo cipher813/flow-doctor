@@ -13,6 +13,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   version-bump-check:
     name: pyproject version bumped for flow_doctor/ changes
