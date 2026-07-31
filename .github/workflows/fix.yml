@@ -71,18 +71,24 @@ jobs:
           python-version: ${{ inputs.python-version }}
 
       - name: Install dependencies
+        env:
+          REQUIREMENTS_FILE: ${{ inputs.requirements-file }}
+          EXTRA_PIP_INSTALL: ${{ inputs.extra-pip-install }}
         run: |
           pip install --upgrade pip
-          if [ -f "${{ inputs.requirements-file }}" ]; then pip install -r "${{ inputs.requirements-file }}"; fi
+          if [ -f "$REQUIREMENTS_FILE" ]; then pip install -r "$REQUIREMENTS_FILE"; fi
           pip install pytest
-          if [ -n "${{ inputs.extra-pip-install }}" ]; then pip install ${{ inputs.extra-pip-install }}; fi
+          if [ -n "$EXTRA_PIP_INSTALL" ]; then pip install $EXTRA_PIP_INSTALL; fi
 
       - name: Generate fix
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          CONFIG_PATH: ${{ inputs.config-path }}
         run: |
-          python -m flow_doctor.fix.cli generate-fix --issue-number ${{ github.event.issue.number }} --repo ${{ github.repository }} --token "$GITHUB_TOKEN" --config "${{ inputs.config-path }}"
+          python -m flow_doctor.fix.cli generate-fix --issue-number "$ISSUE_NUMBER" --repo "$REPO" --token "$GITHUB_TOKEN" --config "$CONFIG_PATH"
 
       - name: Comment on failure
         if: failure()
