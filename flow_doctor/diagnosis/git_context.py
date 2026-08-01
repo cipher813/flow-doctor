@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from typing import Dict, Optional
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+
+# Deploy-drift errors carry two SHAs and the LLM cannot infer ordering
+# from the error string alone.  Extract them deterministically so we can
+# inject commit-range context before the diagnosis call ever runs.
+_DEPLOY_DRIFT_SHA_RE = re.compile(
+    r"\b([0-9a-f]{7,40})\b", re.IGNORECASE
+)
 
 
 class GitContextLoader:
@@ -44,6 +52,102 @@ class GitContextLoader:
         except Exception as e:
             print(f"[flow-doctor] Git context load failed: {e}", file=sys.stderr)
             return {}
+
+    @staticmethod
+    def load_sha_range(
+        repo_path: str,
+        old_sha: str,
+        new_sha: str,
+    ) -> Dict[str, str]:
+        """Load commit-range context between two SHAs.
+
+        Determines which SHA is newer via ``git merge-base --is-ancestor``,
+        then returns the log between them.  The caller injects the result
+        into the diagnosis prompt so the LLM can produce a remediation
+        that points to the correct direction.
+
+        Returns a dict with keys ``sha_range_log``, ``newer_sha``,
+        ``older_sha``, or an empty dict on any failure.
+        """
+        try:
+            cwd = repo_path or "."
+
+            # --- Determine ordering ----------------------------------------
+            newer: Optional[str] = None
+            older: Optional[str] = None
+
+            # Is old_sha an ancestor of new_sha?
+            anc1 = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", old_sha, new_sha],
+                capture_output=True, text=True, cwd=cwd, timeout=10,
+            )
+            if anc1.returncode == 0:
+                newer, older = new_sha, old_sha
+
+            # Try the reverse?
+            if newer is None:
+                anc2 = subprocess.run(
+                    ["git", "merge-base", "--is-ancestor", new_sha, old_sha],
+                    capture_output=True, text=True, cwd=cwd, timeout=10,
+                )
+                if anc2.returncode == 0:
+                    newer, older = old_sha, new_sha
+
+            if newer is None or older is None:
+                # Not in a direct ancestor relationship — don't guess
+                return {}
+
+            # --- Commit range log ------------------------------------------
+            log_result = subprocess.run(
+                ["git", "log", "--oneline", f"{older}..{newer}"],
+                capture_output=True, text=True, cwd=cwd, timeout=10,
+            )
+            sha_range_log = (
+                log_result.stdout.strip()
+                if log_result.returncode == 0
+                else ""
+            )
+
+            if not sha_range_log:
+                return {}
+
+            return {
+                "sha_range_log": sha_range_log,
+                "newer_sha": newer,
+                "older_sha": older,
+            }
+
+        except Exception as e:
+            print(
+                f"[flow-doctor] SHA range context load failed: {e}",
+                file=sys.stderr,
+            )
+            return {}
+
+    @classmethod
+    def detect_and_load_sha_range(
+        cls,
+        error_message: str,
+        repo_path: str = ".",
+    ) -> Optional[Dict[str, str]]:
+        """If *error_message* contains ≥2 SHAs, load the commit-range context.
+
+        Returns the dict from :meth:`load_sha_range`, or ``None`` when the
+        error doesn't look like a deploy-drift message or the range can't be
+        resolved.
+        """
+        shas = _DEPLOY_DRIFT_SHA_RE.findall(error_message)
+        if len(shas) < 2:
+            return None
+        # Try the first two distinct SHAs
+        unique = []
+        for s in shas:
+            if s not in unique:
+                unique.append(s)
+        if len(unique) < 2:
+            return None
+        result = cls.load_sha_range(repo_path, unique[0], unique[1])
+        return result if result else None
 
     @staticmethod
     def load_github(repo: str, token: str) -> Dict[str, str]:
