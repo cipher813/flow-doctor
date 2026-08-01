@@ -23,6 +23,7 @@ class DiagnosisContext:
     dependency_status: Optional[str] = None
     git_log: Optional[str] = None
     changed_files: Optional[str] = None
+    sha_range_context: Optional[str] = None
     known_patterns: Optional[List[str]] = None
 
 
@@ -72,7 +73,16 @@ Categories:
 - INFRA: OOM, disk full, Lambda limits, resource exhaustion
 
 "alternative_hypotheses" must include at least one non-CODE hypothesis whenever you
-choose CODE, and at least one CODE hypothesis whenever you choose another category."""
+choose CODE, and at least one CODE hypothesis whenever you choose another category.
+
+DEPLOY-DRIFT ERRORS: when the error message names two commit SHAs and the prompt
+includes DETERMINISTIC COMMIT-RANGE CONTEXT, the context names which SHA is newer
+(verified by git merge-base). The newer SHA is the correct checkout target — it
+contains the commits the older SHA lacks. Never recommend checking out the older
+SHA when the context shows it is the ancestor. If commit-range context is present
+but neither SHA is confirmed newer (non-linear history), state that ordering
+could not be determined and do NOT recommend a specific checkout direction — label
+the remediation as requiring human verification of the correct target SHA."""
 
 
 class ContextAssembler:
@@ -117,6 +127,7 @@ class ContextAssembler:
             dependency_status=dependency_status,
             git_log=git_context.get("git_log") if git_context else None,
             changed_files=git_context.get("changed_files") if git_context else None,
+            sha_range_context=git_context.get("sha_range_context") if git_context else None,
             known_patterns=pattern_strs,
         )
 
@@ -150,6 +161,13 @@ class ContextAssembler:
             status = ctx.dependency_status or "unknown"
             flow_lines.append(f"- Dependencies: {dep_str} (status: {status})")
         sections.append("FLOW CONTEXT:\n" + "\n".join(flow_lines))
+
+        # Commit-range context (deterministic, always placed before git-log)
+        if ctx.sha_range_context:
+            sections.append(
+                f"DETERMINISTIC COMMIT-RANGE CONTEXT (ordering verified via "
+                f"git merge-base):\n{ctx.sha_range_context}"
+            )
 
         # Git context
         if ctx.git_log:
