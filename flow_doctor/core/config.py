@@ -68,6 +68,13 @@ class NotifyChannelConfig(_ConfigModel):
     # entire channel when its own prerequisite isn't met. See
     # FlowDoctor._send_notifications and DiagnosisConfig.
     notify_on_category: Optional[List[str]] = None
+    # Cascade routing. Default False: a report whose cascade_source is set is
+    # derived from an upstream failure already reported on its own, so paging
+    # on it multiplies one root cause into N pages. Suppressed reports are
+    # still persisted and still recorded as a DEGRADED action queued for the
+    # digest — never dropped. Set True on an archival or aggregate sink that
+    # wants every report. See FlowDoctor._send_notifications.
+    notify_on_cascade: bool = False
     # Slack fields
     webhook_url: Optional[str] = None
     channel: Optional[str] = None
@@ -354,6 +361,7 @@ def _parse_notify_dicts(items: List[Dict]) -> List[NotifyChannelConfig]:
             type=item.get("type", "slack"),
             notify_on=item.get("notify_on"),
             notify_on_category=item.get("notify_on_category"),
+            notify_on_cascade=bool(item.get("notify_on_cascade", False)),
             webhook_url=item.get("webhook_url"),
             channel=item.get("channel"),
             sender=item.get("sender"),

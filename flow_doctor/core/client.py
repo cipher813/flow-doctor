@@ -104,14 +104,41 @@ _DEFAULT_NOTIFY_ON: FrozenSet[str] = frozenset(
 )
 
 
+def _action_type_for(notifier: object) -> str:
+    """Map a notifier instance to its ``ActionType`` value.
+
+    Imports are function-local to keep the notify backends optional at import
+    time (each pulls its own transport dependency).
+    """
+    from flow_doctor.notify.slack import SlackNotifier
+    from flow_doctor.notify.email import EmailNotifier
+    from flow_doctor.notify.github import GitHubNotifier
+    from flow_doctor.notify.s3 import S3Notifier
+    from flow_doctor.notify.telegram import TelegramNotifier
+
+    if isinstance(notifier, SlackNotifier):
+        return ActionType.SLACK_ALERT.value
+    if isinstance(notifier, EmailNotifier):
+        return ActionType.EMAIL_ALERT.value
+    if isinstance(notifier, GitHubNotifier):
+        return ActionType.GITHUB_ISSUE.value
+    if isinstance(notifier, S3Notifier):
+        return ActionType.S3_ALERT.value
+    if isinstance(notifier, TelegramNotifier):
+        return ActionType.TELEGRAM_ALERT.value
+    return "unknown_alert"
+
+
 def _classify_dispatch(d: Dict[str, int]) -> str:
     """Map a ``_send_notifications`` result into a single DecisionReason value.
 
-    Priority: any successful send -> fired; else all matching notifiers
-    rate-limited -> rate_limited; else every attempt failed -> delivery_failed;
-    else nothing matched the severity -> severity_filtered; else nothing
-    matched the diagnosis category -> category_filtered; else nothing was
-    configured to receive it -> no_notifiers.
+    Priority: any successful send -> fired; else every attempt failed ->
+    delivery_failed; else all matching notifiers rate-limited -> rate_limited;
+    else the report was suppressed as a cascade of an already-reported upstream
+    failure -> cascade_suppressed; else nothing matched the severity ->
+    severity_filtered; else nothing matched the diagnosis category ->
+    category_filtered; else nothing was configured to receive it ->
+    no_notifiers.
     """
     if d.get("sent", 0) > 0:
         return DecisionReason.FIRED.value
@@ -119,6 +146,8 @@ def _classify_dispatch(d: Dict[str, int]) -> str:
         return DecisionReason.DELIVERY_FAILED.value
     if d.get("degraded", 0) > 0:
         return DecisionReason.RATE_LIMITED.value
+    if d.get("cascade_skipped", 0) > 0:
+        return DecisionReason.CASCADE_SUPPRESSED.value
     if d.get("severity_skipped", 0) > 0:
         return DecisionReason.SEVERITY_FILTERED.value
     if d.get("category_skipped", 0) > 0:
@@ -597,6 +626,9 @@ class FlowDoctor:
                 )
                 notifiers[-1].notify_on_category = _normalize_notify_on_category(
                     getattr(nc, "notify_on_category", None)
+                )
+                notifiers[-1].notify_on_cascade = bool(
+                    getattr(nc, "notify_on_cascade", False)
                 )
 
         return notifiers
@@ -1407,8 +1439,8 @@ class FlowDoctor:
         """Send notifications, respecting rate limits.
 
         Returns a dispatch tally ``{attempted, sent, failed, degraded,
-        severity_skipped, category_skipped}`` so the caller can record
-        exactly why this error did or did not produce an alert.
+        severity_skipped, category_skipped, cascade_skipped}`` so the caller
+        can record exactly why this error did or did not produce an alert.
 
         Failures are logged at CRITICAL via the ``flow_doctor`` logger so
         they surface in the host app's log stream (journalctl, Sentry,
@@ -1443,6 +1475,7 @@ class FlowDoctor:
         degraded = 0
         severity_skipped = 0
         category_skipped = 0
+        cascade_skipped = 0
         failed: List[str] = []
 
         for notifier in self._notifiers:
@@ -1451,30 +1484,35 @@ class FlowDoctor:
                 severity_skipped += 1
                 continue
 
+            # Cascade routing, BEFORE severity-independent work. A report whose
+            # cascade_source is set is derived from an upstream failure that was
+            # already reported on its own; paging on it turns one root cause into
+            # N pages. Until this gate existed, `is_cascade` was computed, stored,
+            # and rendered as a decorative line in the message body ("Likely caused
+            # by upstream `X` failure") while having ZERO effect on dispatch — the
+            # system knew the alert was derived and sent it at full severity anyway.
+            # Suppression here is NOT a drop: the report is already persisted, and a
+            # DEGRADED action is recorded so it reaches the digest and stays
+            # countable ("saw N, alerted M").
+            if is_cascade and not notifier.notify_on_cascade:
+                action = Action(
+                    report_id=report.id,
+                    action_type=_action_type_for(notifier),
+                    status=ActionStatus.DEGRADED.value,
+                    target="cascade - queued for digest",
+                    diagnosis_id=diagnosis.id if diagnosis else None,
+                )
+                self._store.save_action(action)
+                cascade_skipped += 1
+                continue
+
             if notifier.notify_on_category and diagnosis is not None:
                 report_category = (diagnosis.category or "").strip().upper()
                 if report_category not in notifier.notify_on_category:
                     category_skipped += 1
                     continue
 
-            from flow_doctor.notify.slack import SlackNotifier
-            from flow_doctor.notify.email import EmailNotifier
-            from flow_doctor.notify.github import GitHubNotifier
-            from flow_doctor.notify.s3 import S3Notifier
-            from flow_doctor.notify.telegram import TelegramNotifier
-
-            if isinstance(notifier, SlackNotifier):
-                action_type = ActionType.SLACK_ALERT.value
-            elif isinstance(notifier, EmailNotifier):
-                action_type = ActionType.EMAIL_ALERT.value
-            elif isinstance(notifier, GitHubNotifier):
-                action_type = ActionType.GITHUB_ISSUE.value
-            elif isinstance(notifier, S3Notifier):
-                action_type = ActionType.S3_ALERT.value
-            elif isinstance(notifier, TelegramNotifier):
-                action_type = ActionType.TELEGRAM_ALERT.value
-            else:
-                action_type = "unknown_alert"
+            action_type = _action_type_for(notifier)
 
             # Rate limit check. Severity is threaded so a genuine failure page
             # is never silenced by the blunt daily cap — repeats of the SAME
@@ -1554,6 +1592,7 @@ class FlowDoctor:
             "degraded": degraded,
             "severity_skipped": severity_skipped,
             "category_skipped": category_skipped,
+            "cascade_skipped": cascade_skipped,
         }
 
     @contextmanager
