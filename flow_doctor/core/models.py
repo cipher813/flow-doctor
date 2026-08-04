@@ -59,6 +59,7 @@ class DecisionReason(str, Enum):
     RATE_LIMITED = "rate_limited"             # all matching notifiers degraded
     SEVERITY_FILTERED = "severity_filtered"   # no notifier opted in at this severity
     CATEGORY_FILTERED = "category_filtered"   # no notifier opted in at this diagnosis category
+    CASCADE_SUPPRESSED = "cascade_suppressed" # derived from an upstream failure already reported
     DELIVERY_FAILED = "delivery_failed"       # attempted but every notifier failed
     NO_NOTIFIERS = "no_notifiers"             # nothing configured to receive it
 

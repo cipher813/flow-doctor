@@ -29,6 +29,18 @@ class Notifier(ABC):
     # not set it.
     notify_on_category: Optional[Set[str]] = None
 
+    # Cascade routing for this notifier instance, set by
+    # ``FlowDoctor._init_notifiers`` from the config's ``notify_on_cascade``.
+    # When False (the default) this notifier does NOT receive reports whose
+    # ``cascade_source`` is set — the failure is derived from an upstream one
+    # that was already reported, so paging on it multiplies one root cause
+    # into N pages. The report is still persisted and still recorded as a
+    # DEGRADED action queued for the digest, so it is never silently dropped;
+    # it simply stops being a push. Archival or aggregate sinks that want
+    # everything set this True. Custom notifier subclasses inherit this
+    # attribute and need not set it.
+    notify_on_cascade: bool = False
+
     @abstractmethod
     def send(
         self,
