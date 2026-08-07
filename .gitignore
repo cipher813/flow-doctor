@@ -45,3 +45,10 @@ htmlcov/
 # CONTRIBUTING.md. Public repos keep these out of git by default.
 /AGENTS.md
 /CLAUDE.md
+
+# Gitleaks config — a LOCAL symlink to the shared config, never committed.
+# It was tracked until 2026-08-07 as a symlink to an absolute laptop path, which
+# dangles in every CI checkout: local and CI then scanned under different rules
+# and the locally-generated baseline did not match what CI found. See
+# alpha-engine-config-I6622.
+.gitleaks.toml
