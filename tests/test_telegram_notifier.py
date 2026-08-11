@@ -29,6 +29,26 @@ from flow_doctor.notify.telegram import (
 )
 
 
+@pytest.fixture
+def no_krepis_transport():
+    """Force `_post`'s FALLBACK branch — the one these payload tests assert on.
+
+    `TelegramNotifier._post` prefers `krepis.telegram.send_message` when krepis
+    is importable and only builds its own payload when it is not. krepis IS
+    installed in this environment, so every test here that patched
+    `flow_doctor.notify.telegram.urlopen` was patching a branch that never ran:
+    the patch silently missed, the krepis transport made a REAL request to
+    api.telegram.org with the fake token `123:abc`, and the assertions failed on
+    a 401. A unit suite must not reach the network, and a passing-by-accident
+    patch target is worse than a failing one.
+
+    `sys.modules[...] = None` is the documented way to make an `import` raise
+    ImportError, which is exactly the condition the fallback branch tests.
+    """
+    with patch.dict(sys.modules, {"krepis.telegram": None}):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # TelegramNotifierConfig (typed)
 # ---------------------------------------------------------------------------
@@ -161,7 +181,7 @@ def _fake_urlopen_response(body: dict, status: int = 200):
     return resp
 
 
-def test_send_posts_to_correct_bot_api_url():
+def test_send_posts_to_correct_bot_api_url(no_krepis_transport):
     notifier = TelegramNotifier(bot_token="123:abc", chat_id=-100)
     with patch("flow_doctor.notify.telegram.urlopen") as mock_urlopen:
         mock_urlopen.return_value = _fake_urlopen_response({"ok": True})
@@ -172,7 +192,7 @@ def test_send_posts_to_correct_bot_api_url():
     assert req.get_method() == "POST"
 
 
-def test_send_payload_includes_chat_id_text_and_parse_mode():
+def test_send_payload_includes_chat_id_text_and_parse_mode(no_krepis_transport):
     notifier = TelegramNotifier(bot_token="t", chat_id=42)
     with patch("flow_doctor.notify.telegram.urlopen") as mock_urlopen:
         mock_urlopen.return_value = _fake_urlopen_response({"ok": True})
@@ -185,7 +205,7 @@ def test_send_payload_includes_chat_id_text_and_parse_mode():
     assert "morning-signal" in payload["text"]
 
 
-def test_send_payload_includes_message_thread_id_when_set():
+def test_send_payload_includes_message_thread_id_when_set(no_krepis_transport):
     notifier = TelegramNotifier(
         bot_token="t", chat_id=1, message_thread_id=99
     )
@@ -199,7 +219,7 @@ def test_send_payload_includes_message_thread_id_when_set():
     assert target == "telegram:1:99"
 
 
-def test_send_payload_omits_message_thread_id_when_unset():
+def test_send_payload_omits_message_thread_id_when_unset(no_krepis_transport):
     notifier = TelegramNotifier(bot_token="t", chat_id=1)
     with patch("flow_doctor.notify.telegram.urlopen") as mock_urlopen:
         mock_urlopen.return_value = _fake_urlopen_response({"ok": True})
@@ -229,7 +249,7 @@ def test_send_prefers_krepis_transport_when_available():
     assert target == "telegram:-100:7"
 
 
-def test_send_disable_notification_flag_passes_through():
+def test_send_disable_notification_flag_passes_through(no_krepis_transport):
     notifier = TelegramNotifier(
         bot_token="t", chat_id=1, disable_notification=True
     )
@@ -240,7 +260,7 @@ def test_send_disable_notification_flag_passes_through():
     assert payload["disable_notification"] is True
 
 
-def test_send_with_parse_mode_none_omits_field():
+def test_send_with_parse_mode_none_omits_field(no_krepis_transport):
     notifier = TelegramNotifier(bot_token="t", chat_id=1, parse_mode=None)
     with patch("flow_doctor.notify.telegram.urlopen") as mock_urlopen:
         mock_urlopen.return_value = _fake_urlopen_response({"ok": True})
@@ -316,7 +336,7 @@ def test_format_message_renders_logs_body():
 # ---------------------------------------------------------------------------
 
 
-def test_send_notifications_dispatches_to_telegram_action_type(monkeypatch):
+def test_send_notifications_dispatches_to_telegram_action_type(monkeypatch, no_krepis_transport):
     """Verify the dispatch loop in _send_notifications correctly maps
     a TelegramNotifier instance to ActionType.TELEGRAM_ALERT so the
     persisted action row reflects the channel that actually fired."""
@@ -353,7 +373,7 @@ def test_send_notifications_dispatches_to_telegram_action_type(monkeypatch):
         assert not any("t" == t for t in targets)  # never the raw token
 
 
-def test_successful_dispatch_emits_info_log_line(monkeypatch, caplog):
+def test_successful_dispatch_emits_info_log_line(monkeypatch, caplog, no_krepis_transport):
     """Symmetric observability: when a notifier successfully delivers a
     failure report, flow-doctor MUST log an INFO line so operators can
     confirm from journalctl that the alert fired. Without this, a

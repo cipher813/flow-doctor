@@ -304,7 +304,12 @@ class FlowDoctor:
             for _n in self._notifiers:
                 _n.validate()
             self._dedup = DedupChecker(self._store, config.dedup_cooldown_minutes)
-            self._rate_limiter = RateLimiter(self._store, config.rate_limits)
+            # flow_name is what makes `max_alerts_per_day` mean per-component
+            # rather than per-store. Without it every flow sharing a table drew
+            # on one budget (alpha-engine-config-I6921).
+            self._rate_limiter = RateLimiter(
+                self._store, config.rate_limits, flow_name=config.flow_name
+            )
             self._cascade_detector = CascadeDetector(self._store)
 
             # Phase 2: diagnosis components
@@ -1232,6 +1237,7 @@ class FlowDoctor:
             if decision == "degrade":
                 # Log the degraded diagnosis action
                 action = Action(
+                    flow_name=self.config.flow_name,
                     report_id=report.id,
                     action_type="diagnosis",
                     status=ActionStatus.DEGRADED.value,
@@ -1246,6 +1252,7 @@ class FlowDoctor:
                 daily_cost = self._store.get_daily_diagnosis_cost()
                 if daily_cost >= max_cost:
                     action = Action(
+                        flow_name=self.config.flow_name,
                         report_id=report.id,
                         action_type="diagnosis",
                         status=ActionStatus.DEGRADED.value,
@@ -1275,6 +1282,7 @@ class FlowDoctor:
             # 4. Save diagnosis and record the action
             self._store.save_diagnosis(diagnosis)
             action = Action(
+                flow_name=self.config.flow_name,
                 report_id=report.id,
                 action_type="diagnosis",
                 status=ActionStatus.SENT.value,
@@ -1496,6 +1504,7 @@ class FlowDoctor:
             # countable ("saw N, alerted M").
             if is_cascade and not notifier.notify_on_cascade:
                 action = Action(
+                    flow_name=self.config.flow_name,
                     report_id=report.id,
                     action_type=_action_type_for(notifier),
                     status=ActionStatus.DEGRADED.value,
@@ -1521,6 +1530,7 @@ class FlowDoctor:
             decision = self._rate_limiter.check(action_type, severity=report.severity)
             if decision == "degrade":
                 action = Action(
+                    flow_name=self.config.flow_name,
                     report_id=report.id,
                     action_type=action_type,
                     status=ActionStatus.DEGRADED.value,
@@ -1541,6 +1551,7 @@ class FlowDoctor:
             try:
                 target = notifier.send(report, self.config.flow_name, diagnosis)
                 action = Action(
+                    flow_name=self.config.flow_name,
                     report_id=report.id,
                     action_type=action_type,
                     status=ActionStatus.SENT.value if target else ActionStatus.FAILED.value,
@@ -1568,6 +1579,7 @@ class FlowDoctor:
                     action_type, report.id, e, exc_info=True,
                 )
                 action = Action(
+                    flow_name=self.config.flow_name,
                     report_id=report.id,
                     action_type=action_type,
                     status=ActionStatus.FAILED.value,

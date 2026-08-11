@@ -129,3 +129,38 @@ def test_cross_instance_dedup_via_signature(store):
     )
     assert found is not None
     assert found.id == report.id
+
+
+def test_count_actions_today_is_scoped_by_flow(store):
+    """The budget reads as per-component in every config file; the count behind
+    it must agree. Five flows shared one `flow-doctor-store` table on
+    2026-08-11, all drawing on one count (alpha-engine-config-I6921)."""
+    from flow_doctor.core.models import Action
+
+    for flow, n in (("executor", 3), ("research-lambda", 2)):
+        for _ in range(n):
+            store.save_action(
+                Action(
+                    report_id="r", action_type="email_alert",
+                    status="sent", flow_name=flow,
+                )
+            )
+
+    assert store.count_actions_today("email_alert", "executor") == 3
+    assert store.count_actions_today("email_alert", "research-lambda") == 2
+    # Unscoped keeps the old meaning for callers that have not been updated.
+    assert store.count_actions_today("email_alert") == 5
+
+
+def test_save_action_omits_an_absent_flow_name(store):
+    """`flow_name` is a key attribute of SignatureIndex and DynamoDB rejects an
+    empty string for an index key, so an `or ""` form raises ValidationException
+    on every unscoped write. Absent must mean absent."""
+    from flow_doctor.core.models import Action
+
+    store.save_action(
+        Action(report_id="r", action_type="email_alert", status="sent")
+    )
+    assert store.count_actions_today("email_alert") == 1
+    # An unscoped row belongs to no flow's budget rather than to a "" flow.
+    assert store.count_actions_today("email_alert", "executor") == 0

@@ -125,6 +125,17 @@ class Action:
     diagnosis_id: Optional[str] = None
     target: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    # Which flow emitted this action. Load-bearing for the daily budget, not
+    # decoration: `RateLimiter` counts actions per (action_type, flow_name), and
+    # before this field existed it could only count per action_type — so every
+    # component sharing a store shared ONE budget while each config believed it
+    # had its own. Measured 2026-08-11: five flows on one `flow-doctor-store`
+    # table, all five drawing on one count. Since 0.8.8 the severity exemption
+    # keeps error/critical out of the cap, so the live exposure is warning and
+    # info severities only (alpha-engine-config-I6921).
+    # Optional because rows written before this field lack it; those fall out of
+    # every flow's count, which is the desired reset rather than a loss.
+    flow_name: Optional[str] = None
     id: str = field(default_factory=_ulid)
     created_at: datetime = field(default_factory=datetime.utcnow)
 
