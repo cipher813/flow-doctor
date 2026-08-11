@@ -206,27 +206,36 @@ class DynamoDBStorage(StorageBackend):
         self.save_report(report)
 
     def save_action(self, action: Action) -> None:
-        self._table.put_item(
-            Item={
-                "pk": f"ACTION#{action.id}",
-                "sk": "META",
-                "entity": "action",
-                "action_type": action.action_type,
-                "created_at": _iso(action.created_at),
-                "payload": json.dumps(
-                    {
-                        "id": action.id,
-                        "report_id": action.report_id,
-                        "diagnosis_id": action.diagnosis_id,
-                        "action_type": action.action_type,
-                        "target": action.target,
-                        "status": action.status,
-                        "metadata": action.metadata,
-                        "created_at": _iso(action.created_at),
-                    }
-                ),
-            }
-        )
+        item = {
+            "pk": f"ACTION#{action.id}",
+            "sk": "META",
+            "entity": "action",
+            "action_type": action.action_type,
+            "created_at": _iso(action.created_at),
+            "payload": json.dumps(
+                {
+                    "id": action.id,
+                    "report_id": action.report_id,
+                    "diagnosis_id": action.diagnosis_id,
+                    "action_type": action.action_type,
+                    "flow_name": action.flow_name,
+                    "target": action.target,
+                    "status": action.status,
+                    "metadata": action.metadata,
+                    "created_at": _iso(action.created_at),
+                }
+            ),
+        }
+        # Top-level, not only inside `payload`: the rate limiter filters on it
+        # server-side and a JSON blob is not filterable
+        # (alpha-engine-config-I6921). OMITTED rather than written as "" when
+        # absent — `flow_name` is a key attribute of `SignatureIndex`, and
+        # DynamoDB rejects an empty string for an index key outright, so the
+        # `or ""` form would have made every unscoped save_action raise
+        # ValidationException in production.
+        if action.flow_name:
+            item["flow_name"] = action.flow_name
+        self._table.put_item(Item=item)
 
     def save_decision(self, decision: Decision) -> None:
         self._table.put_item(
@@ -278,17 +287,37 @@ class DynamoDBStorage(StorageBackend):
             counts[reason] = counts.get(reason, 0) + 1
         return counts
 
-    def count_actions_today(self, action_type: str) -> int:
+    def count_actions_today(
+        self, action_type: str, flow_name: Optional[str] = None
+    ) -> int:
+        """Count today's actions of *action_type*, scoped to *flow_name*.
+
+        The scoping is the whole point. This store is shared: five flows were
+        measured on one `flow-doctor-store` table on 2026-08-11, each config
+        declaring `max_alerts_per_day: 10` and all five drawing on the SAME
+        count. The budget was exhausted fleet-wide at 17:57Z that day, after
+        which any component's next alert was silently degraded
+        (alpha-engine-config-I6921).
+
+        `flow_name` is a FilterExpression rather than a key: the GSI is
+        partitioned on `action_type`, and re-keying it would be a migration
+        with no benefit at this row count. Filtering is applied server-side
+        after the key condition, so the returned COUNT is already scoped.
+        """
         today_start = datetime.combine(date.today(), datetime.min.time()).isoformat()
-        resp = self._table.query(
-            IndexName="ActionTypeIndex",
-            KeyConditionExpression="action_type = :atype AND created_at >= :today",
-            ExpressionAttributeValues={
+        kwargs: dict = {
+            "IndexName": "ActionTypeIndex",
+            "KeyConditionExpression": "action_type = :atype AND created_at >= :today",
+            "ExpressionAttributeValues": {
                 ":atype": action_type,
                 ":today": today_start,
             },
-            Select="COUNT",
-        )
+            "Select": "COUNT",
+        }
+        if flow_name is not None:
+            kwargs["FilterExpression"] = "flow_name = :flow"
+            kwargs["ExpressionAttributeValues"][":flow"] = flow_name
+        resp = self._table.query(**kwargs)
         return int(resp.get("Count", 0))
 
     def has_recent_failure(self, flow_name: str, since: datetime) -> bool:

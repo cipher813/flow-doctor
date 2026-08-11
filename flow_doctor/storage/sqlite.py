@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS actions (
     report_id       TEXT REFERENCES reports(id),
     diagnosis_id    TEXT REFERENCES diagnoses(id),
     action_type     TEXT NOT NULL,
+    flow_name       TEXT,
     target          TEXT,
     status          TEXT NOT NULL,
     metadata        TEXT,
@@ -152,6 +153,14 @@ class SQLiteStorage(StorageBackend):
     def init_schema(self) -> None:
         conn = self._conn()
         conn.executescript(_SCHEMA_SQL)
+        # `CREATE TABLE IF NOT EXISTS` is a no-op on an existing database, so a
+        # store created before `actions.flow_name` existed would keep the old
+        # shape and every insert would fail on the new column list. Additive,
+        # idempotent, and checked rather than caught: an ALTER wrapped in a bare
+        # except would hide a genuinely broken schema (alpha-engine-config-I6921).
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(actions)")}
+        if "flow_name" not in cols:
+            conn.execute("ALTER TABLE actions ADD COLUMN flow_name TEXT")
         conn.commit()
 
     def save_report(self, report: Report) -> None:
@@ -182,13 +191,15 @@ class SQLiteStorage(StorageBackend):
         conn = self._conn()
         conn.execute(
             """INSERT INTO actions
-               (id, report_id, diagnosis_id, action_type, target, status, metadata, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, report_id, diagnosis_id, action_type, flow_name, target,
+                status, metadata, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 action.id,
                 action.report_id,
                 action.diagnosis_id,
                 action.action_type,
+                action.flow_name,
                 action.target,
                 action.status,
                 json.dumps(action.metadata) if action.metadata else None,
@@ -342,13 +353,31 @@ class SQLiteStorage(StorageBackend):
         ).fetchone()
         return row[0] if row else 0
 
-    def count_actions_today(self, action_type: str) -> int:
+    def count_actions_today(
+        self, action_type: str, flow_name: Optional[str] = None
+    ) -> int:
+        """Count today's actions of *action_type*, scoped to *flow_name*.
+
+        See the DynamoDB backend's docstring for why the scoping exists
+        (alpha-engine-config-I6921). A local sqlite store is usually
+        single-flow, so the bug did not bite here — but the two backends must
+        answer the same question the same way, or a local reproduction of a
+        production rate-limit decision silently disagrees with it.
+        """
         conn = self._conn()
         today_start = datetime.combine(date.today(), datetime.min.time()).isoformat()
-        row = conn.execute(
-            "SELECT COUNT(*) as cnt FROM actions WHERE action_type = ? AND created_at >= ?",
-            (action_type, today_start),
-        ).fetchone()
+        if flow_name is None:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM actions "
+                "WHERE action_type = ? AND created_at >= ?",
+                (action_type, today_start),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM actions "
+                "WHERE action_type = ? AND created_at >= ? AND flow_name IS ?",
+                (action_type, today_start, flow_name),
+            ).fetchone()
         return row["cnt"] if row else 0
 
     def has_recent_failure(self, flow_name: str, since: datetime) -> bool:

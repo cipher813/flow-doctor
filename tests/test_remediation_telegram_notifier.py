@@ -15,6 +15,8 @@ Covers:
 
 from __future__ import annotations
 
+import sys
+
 import json
 import tempfile
 from unittest.mock import MagicMock, patch
@@ -31,6 +33,21 @@ from flow_doctor.remediation.decision_gate import (
 from flow_doctor.remediation.executor import ExecutionResult, RemediationExecutor
 
 
+
+@pytest.fixture
+def no_krepis_transport():
+    """Force `_post`'s FALLBACK branch — see the identical fixture in
+    tests/test_telegram_notifier.py.
+
+    `send_raw` routes through `_post`, which prefers
+    `krepis.telegram.send_message` when krepis is importable. krepis IS
+    installed here, so patching `flow_doctor.notify.telegram.urlopen` was
+    patching a branch that never ran: the patch missed and the krepis transport
+    made a REAL request to api.telegram.org with a fake token, failing on 404.
+    """
+    with patch.dict(sys.modules, {"krepis.telegram": None}):
+        yield
+
 def _fake_urlopen_response(body: dict, status: int = 200):
     resp = MagicMock()
     resp.status = status
@@ -45,7 +62,7 @@ def _fake_urlopen_response(body: dict, status: int = 200):
 # ---------------------------------------------------------------------------
 
 
-def test_send_raw_posts_text_to_chat_returns_target_id():
+def test_send_raw_posts_text_to_chat_returns_target_id(no_krepis_transport):
     notifier = TelegramNotifier(bot_token="t", chat_id=-100)
     with patch("flow_doctor.notify.telegram.urlopen") as mock_urlopen:
         mock_urlopen.return_value = _fake_urlopen_response({"ok": True})
@@ -57,7 +74,7 @@ def test_send_raw_posts_text_to_chat_returns_target_id():
     assert payload["parse_mode"] == "Markdown"  # default
 
 
-def test_send_raw_includes_message_thread_id_when_set():
+def test_send_raw_includes_message_thread_id_when_set(no_krepis_transport):
     notifier = TelegramNotifier(bot_token="t", chat_id=1, message_thread_id=99)
     with patch("flow_doctor.notify.telegram.urlopen") as mock_urlopen:
         mock_urlopen.return_value = _fake_urlopen_response({"ok": True})
@@ -67,7 +84,7 @@ def test_send_raw_includes_message_thread_id_when_set():
     assert target == "telegram:1:99"
 
 
-def test_send_raw_override_parse_mode_per_call():
+def test_send_raw_override_parse_mode_per_call(no_krepis_transport):
     """parse_mode arg overrides the instance default — useful for the
     remediation pings where we may want plain text instead of Markdown."""
     notifier = TelegramNotifier(bot_token="t", chat_id=1, parse_mode="Markdown")
@@ -100,7 +117,7 @@ def test_send_raw_swallows_network_failures():
     assert target is None
 
 
-def test_send_raw_truncates_at_telegram_4096_limit():
+def test_send_raw_truncates_at_telegram_4096_limit(no_krepis_transport):
     notifier = TelegramNotifier(bot_token="t", chat_id=1)
     long = "x" * 5000
     with patch("flow_doctor.notify.telegram.urlopen") as mock_urlopen:

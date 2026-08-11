@@ -33,9 +33,25 @@ _ISSUE_ACTIONS = frozenset({
 class RateLimiter:
     """Tiered rate limiter that returns 'allow' or 'degrade' for each action."""
 
-    def __init__(self, store: StorageBackend, config: RateLimitConfig):
+    def __init__(
+        self,
+        store: StorageBackend,
+        config: RateLimitConfig,
+        flow_name: Optional[str] = None,
+    ):
         self.store = store
         self.config = config
+        # The budget reads as per-component in every config file — each declares
+        # its own `max_alerts_per_day` — but the count behind it was not scoped,
+        # so every flow sharing a store drew on ONE budget. `check`'s docstring
+        # already names "a store SHARED by every consumer" as part of the
+        # 2026-07-28 blackout; this is the half of that which was never closed.
+        # Measured 2026-08-11: five flows (`executor`, `data-collector`,
+        # `predictor-inference`, `predictor-regime`, `research-lambda`) on one
+        # `flow-doctor-store` table. Since 0.8.8 the severity exemption keeps
+        # error/critical out of the cap, so the remaining exposure is warning
+        # and info — real, but not a page (alpha-engine-config-I6921).
+        self.flow_name = flow_name
         limits = {"diagnosis": config.max_diagnosed_per_day}
         for action in _ISSUE_ACTIONS:
             limits[action] = config.max_issues_per_day
@@ -94,9 +110,20 @@ class RateLimiter:
             )
             return "allow"
 
-        today_count = self.store.count_actions_today(action)
+        today_count = self.store.count_actions_today(action, self.flow_name)
         if today_count < limit:
             return "allow"
+        # A degrade is announced. Suppressed alerting is the failure mode this
+        # subsystem exists to prevent, and the previous silent path made a
+        # blackout indistinguishable from a quiet day for two days
+        # (see this docstring). Logged, not alerted — alerting about the
+        # alerting budget from inside the budget check is a loop.
+        _logger.warning(
+            "flow=%s action=%s: daily budget reached (%d/%d) — this and further "
+            "non-exempt %s from this flow are DEGRADED and will not be "
+            "delivered until UTC midnight.",
+            self.flow_name or "<unscoped>", action, today_count, limit, action,
+        )
         return "degrade"
 
 

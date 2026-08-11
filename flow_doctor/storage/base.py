@@ -54,8 +54,16 @@ class StorageBackend(ABC):
         """Increment the dedup_count for a report."""
 
     @abstractmethod
-    def count_actions_today(self, action_type: str) -> int:
-        """Count actions of the given type created today (UTC)."""
+    def count_actions_today(
+        self, action_type: str, flow_name: Optional[str] = None
+    ) -> int:
+        """Count today's (UTC) actions of *action_type*.
+
+        When *flow_name* is given the count is scoped to that flow. Backends
+        sharing one store MUST honour it: an unscoped count makes every flow's
+        `max_alerts_per_day` a single shared budget, which is what silently
+        suppressed fleet alerting on 2026-08-11 (alpha-engine-config-I6921).
+        """
 
     @abstractmethod
     def has_recent_failure(self, flow_name: str, since: datetime) -> bool:

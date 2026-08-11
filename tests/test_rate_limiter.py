@@ -196,3 +196,93 @@ def test_exemption_is_configurable_and_can_be_disabled():
             status=ActionStatus.SENT.value,
         ))
     assert rl.check(ActionType.TELEGRAM_ALERT.value, severity="error") == "degrade"
+
+
+def _alert(flow=None):
+    return Action(
+        report_id="r",
+        action_type=ActionType.EMAIL_ALERT.value,
+        status=ActionStatus.SENT.value,
+        flow_name=flow,
+    )
+
+
+def test_budget_is_scoped_per_flow():
+    """One store, two flows, one nominal budget each — and they must not draw
+    on each other's.
+
+    The budget reads as per-component in every config file. Until `flow_name`
+    was threaded through, the count behind it was not, so five flows on one
+    `flow-doctor-store` table shared a single budget
+    (alpha-engine-config-I6921). `check`'s own docstring already named "a store
+    SHARED by every consumer" as part of the 2026-07-28 blackout; this is the
+    half of that which was never closed.
+    """
+    store = _make_store()
+    config = RateLimitConfig(max_alerts_per_day=2)
+
+    noisy = RateLimiter(store, config, flow_name="executor")
+    quiet = RateLimiter(store, config, flow_name="research-lambda")
+
+    for _ in range(5):
+        store.save_action(_alert("executor"))
+
+    assert noisy.check(ActionType.EMAIL_ALERT.value) == "degrade"
+    # The whole point: a noisy neighbour must not spend this flow's budget.
+    assert quiet.check(ActionType.EMAIL_ALERT.value) == "allow"
+
+
+def test_unscoped_limiter_keeps_the_old_global_meaning():
+    """A caller that has not been updated must not silently start counting
+    under a null flow — it keeps counting everything, as before."""
+    store = _make_store()
+    config = RateLimitConfig(max_alerts_per_day=2)
+    rl = RateLimiter(store, config)
+
+    for flow in ("executor", "research-lambda", "data-collector"):
+        store.save_action(_alert(flow))
+
+    assert rl.check(ActionType.EMAIL_ALERT.value) == "degrade"
+
+
+def test_a_degrade_is_announced(caplog):
+    """Suppressed alerting is the failure mode this subsystem exists to
+    prevent. The previous silent path made a two-day blackout
+    indistinguishable from a quiet stretch."""
+    store = _make_store()
+    config = RateLimitConfig(max_alerts_per_day=1)
+    rl = RateLimiter(store, config, flow_name="executor")
+    store.save_action(_alert("executor"))
+
+    with caplog.at_level("WARNING"):
+        assert rl.check(ActionType.EMAIL_ALERT.value) == "degrade"
+
+    msg = " ".join(r.getMessage() for r in caplog.records)
+    assert "executor" in msg and "DEGRADED" in msg
+
+
+def test_an_allow_stays_quiet(caplog):
+    """The warning must fire on the degrade, not on every check — an alerting
+    library that logs a WARNING per delivered alert is its own noise source."""
+    store = _make_store()
+    rl = RateLimiter(store, RateLimitConfig(max_alerts_per_day=5), flow_name="x")
+
+    with caplog.at_level("WARNING"):
+        assert rl.check(ActionType.EMAIL_ALERT.value) == "allow"
+
+    assert not [r for r in caplog.records if "DEGRADED" in r.getMessage()]
+
+
+def test_exempt_severities_still_bypass_the_scoped_budget():
+    """The 0.8.8 exemption is what keeps a page from ever being capped, and it
+    must survive the scoping change — it is the reason I6921 was a P2 and not
+    an incident."""
+    store = _make_store()
+    config = RateLimitConfig(max_alerts_per_day=1)
+    rl = RateLimiter(store, config, flow_name="executor")
+    for _ in range(9):
+        store.save_action(_alert("executor"))
+
+    assert rl.check(ActionType.EMAIL_ALERT.value, severity="error") == "allow"
+    assert rl.check(ActionType.EMAIL_ALERT.value, severity="critical") == "allow"
+    assert rl.check(ActionType.EMAIL_ALERT.value, severity="warning") == "degrade"
