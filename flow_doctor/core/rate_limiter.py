@@ -113,12 +113,34 @@ class RateLimiter:
         today_count = self.store.count_actions_today(action, self.flow_name)
         if today_count < limit:
             return "allow"
-        # A degrade is announced. Suppressed alerting is the failure mode this
-        # subsystem exists to prevent, and the previous silent path made a
-        # blackout indistinguishable from a quiet day for two days
-        # (see this docstring). Logged, not alerted — alerting about the
-        # alerting budget from inside the budget check is a loop.
-        _logger.warning(
+
+        # SATURATION SIGNAL (alpha-engine-config-I6927, Brian's ruling
+        # 2026-08-11: keep the cap, but stop treating it as invisible
+        # plumbing).
+        #
+        # The FIRST crossing reports at ERROR; every subsequent degrade that day
+        # stays at WARNING. `today_count == limit` is exactly the first
+        # crossing: degraded actions are persisted with the same action_type, so
+        # the count keeps climbing past the limit and this equality holds once.
+        # No new storage, no status filter, no cursor.
+        #
+        # ERROR is what makes it REACH someone. `krepis.logging.setup_logging`
+        # attaches its alert handler to the ROOT logger at ERROR, so a WARNING —
+        # all 0.10.0 emitted — lands in logs nobody reads during an incident.
+        # That is the same shape as the blackout in this docstring: the system
+        # knew it was suppressing and said so where no one was looking.
+        #
+        # It does not recurse. The report this ERROR generates is itself
+        # severity=error, and error is in `rate_limit_exempt_severities` by
+        # default, so it returns "allow" and never re-enters this branch. If an
+        # operator empties that list they get one extra degraded row per day per
+        # (flow, action) — bounded, and visible in the store.
+        #
+        # A cap whose saturation is unobservable has caused two incidents here
+        # and prevented no recorded one; this is the condition of keeping it.
+        level = logging.ERROR if today_count == limit else logging.WARNING
+        _logger.log(
+            level,
             "flow=%s action=%s: daily budget reached (%d/%d) — this and further "
             "non-exempt %s from this flow are DEGRADED and will not be "
             "delivered until UTC midnight.",
