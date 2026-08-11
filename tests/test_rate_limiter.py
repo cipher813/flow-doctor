@@ -261,6 +261,82 @@ def test_a_degrade_is_announced(caplog):
     assert "executor" in msg and "DEGRADED" in msg
 
 
+def test_the_first_crossing_reports_at_ERROR(caplog):
+    """The saturation signal (alpha-engine-config-I6927).
+
+    `krepis.logging.setup_logging` attaches its alert handler to the root
+    logger at ERROR, so a WARNING lands in logs nobody reads during an
+    incident. The first crossing must REACH someone — that is the condition
+    under which this cap was kept rather than removed.
+    """
+    store = _make_store()
+    config = RateLimitConfig(max_alerts_per_day=2)
+    rl = RateLimiter(store, config, flow_name="executor")
+    for _ in range(2):
+        store.save_action(_alert("executor"))
+
+    with caplog.at_level("DEBUG"):
+        assert rl.check(ActionType.EMAIL_ALERT.value) == "degrade"
+
+    errors = [r for r in caplog.records if r.levelno >= 40]
+    assert errors, "the first crossing must be reportable, not just logged"
+    assert "2/2" in errors[0].getMessage()
+
+
+def test_subsequent_degrades_stay_at_WARNING(caplog):
+    """One saturation notice per (flow, action) per day, not one per suppressed
+    alert. A signal that repeats on every occurrence becomes the noise the cap
+    exists to prevent."""
+    store = _make_store()
+    config = RateLimitConfig(max_alerts_per_day=2)
+    rl = RateLimiter(store, config, flow_name="executor")
+    for _ in range(5):  # already well past the limit
+        store.save_action(_alert("executor"))
+
+    with caplog.at_level("DEBUG"):
+        assert rl.check(ActionType.EMAIL_ALERT.value) == "degrade"
+
+    assert not [r for r in caplog.records if r.levelno >= 40]
+    assert [r for r in caplog.records if r.levelno == 30]
+
+
+def test_the_saturation_signal_cannot_recurse():
+    """The report this ERROR generates is itself severity=error, which is
+    exempt by default — so it returns 'allow' and never re-enters the degrade
+    branch. Pinned because a self-triggering alert is the obvious way this
+    design goes wrong."""
+    store = _make_store()
+    config = RateLimitConfig(max_alerts_per_day=1)
+    rl = RateLimiter(store, config, flow_name="executor")
+    store.save_action(_alert("executor"))
+
+    assert rl.check(ActionType.EMAIL_ALERT.value, severity="error") == "allow"
+
+
+def test_each_flow_gets_its_own_saturation_notice(caplog):
+    """Scoping applies to the signal too: one flow crossing its budget must not
+    consume another flow's notice."""
+    store = _make_store()
+    config = RateLimitConfig(max_alerts_per_day=1)
+    for _ in range(3):
+        store.save_action(_alert("executor"))
+    store.save_action(_alert("data-collector"))
+
+    with caplog.at_level("DEBUG"):
+        RateLimiter(store, config, flow_name="executor").check(
+            ActionType.EMAIL_ALERT.value
+        )
+        errors_after_noisy = [r for r in caplog.records if r.levelno >= 40]
+        RateLimiter(store, config, flow_name="data-collector").check(
+            ActionType.EMAIL_ALERT.value
+        )
+
+    # executor is past its first crossing (3 > 1) so it is quiet; the
+    # data-collector is exactly at it (1 == 1) and must report.
+    assert not errors_after_noisy
+    assert [r for r in caplog.records if r.levelno >= 40]
+
+
 def test_an_allow_stays_quiet(caplog):
     """The warning must fire on the degrade, not on every check — an alerting
     library that logs a WARNING per delivered alert is its own noise source."""
