@@ -151,12 +151,19 @@ class RateLimitConfig(_ConfigModel):
 
 class DiagnosisConfig(_ConfigModel):
     enabled: bool = False
-    # "anthropic" (native SDK) or "openai_compat" (any OpenAI-compatible
+    # "anthropic" (native SDK), "openai_compat" (any OpenAI-compatible
     # chat-completions endpoint: OpenRouter open-weight models, OpenAI,
-    # self-hosted vLLM — set base_url + model accordingly).
+    # self-hosted vLLM — set base_url + model accordingly), or "router"
+    # (resolve a krepis router capability class — requires the optional
+    # `krepis` dependency, `pip install flow-doctor[router]`; no api_key
+    # needed, see model_group).
     provider: str = "anthropic"
     model: str = DEFAULT_DIAGNOSIS_MODEL
     api_key: Optional[str] = None
+    # provider: router only. One of the krepis router's capability classes
+    # ("low"/"med"/"high"/"ultra") — the model, endpoint and credential are
+    # all resolved through krepis at call time, never held here.
+    model_group: Optional[str] = None
     # openai_compat only. base_url defaults to OpenRouter. The per-1M prices
     # are REQUIRED for non-OpenRouter endpoints (OpenRouter reports its own
     # billed cost) — they keep the max_daily_cost_usd cap honest.
@@ -504,6 +511,7 @@ def load_config(
             provider=diag_raw.get("provider", "anthropic"),
             model=diag_raw.get("model", DEFAULT_DIAGNOSIS_MODEL),
             api_key=diag_raw.get("api_key"),
+            model_group=diag_raw.get("model_group"),
             base_url=diag_raw.get("base_url", "https://openrouter.ai/api/v1"),
             price_in_per_1m=(
                 float(diag_raw["price_in_per_1m"])

@@ -290,6 +290,22 @@ diagnosis:
   timeout_seconds: 30
   max_daily_cost_usd: 1.00
 
+# `diagnosis.provider` also accepts `openai_compat` (any OpenAI-compatible
+# chat-completions endpoint — OpenRouter, OpenAI, self-hosted vLLM; set
+# `base_url` + `model` and drop `api_key` to use `FLOW_DOCTOR_*` env
+# fallbacks) and `router`:
+#
+# diagnosis:
+#   enabled: true
+#   provider: router
+#   model_group: med        # low | med | high | ultra
+#
+# `router` resolves a capability class through a krepis model router
+# (`pip install flow-doctor[router]`) instead of holding a direct provider
+# key at all — for deployments that are themselves a krepis consumer. No
+# `api_key` is read or needed; the model, endpoint and credential are all
+# decided by the router at call time.
+
 github:
   token: ${GITHUB_TOKEN}
   labels: [flow-doctor]

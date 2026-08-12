@@ -649,7 +649,31 @@ class FlowDoctor:
             dependencies=config.dependencies,
         )
 
-        if config.diagnosis.enabled and config.diagnosis.api_key:
+        # "router" needs no api_key — krepis resolves the credential itself
+        # (env var, then the per-consumer SSM secret) — so it is the one
+        # provider allowed to init without one; every other provider keeps
+        # the pre-existing api_key gate unchanged.
+        if config.diagnosis.enabled and config.diagnosis.provider == "router":
+            try:
+                from flow_doctor.diagnosis.provider import RouterProvider
+                if not config.diagnosis.model_group:
+                    raise ConfigError(
+                        "diagnosis.provider='router' requires diagnosis.model_group "
+                        "(one of: low, med, high, ultra)"
+                    )
+                self._diagnosis_provider = RouterProvider(
+                    model_group=config.diagnosis.model_group,
+                    confidence_calibration=config.diagnosis.confidence_calibration,
+                    timeout_seconds=config.diagnosis.timeout_seconds,
+                    sft_sink_path=config.diagnosis.sft_sink_path,
+                )
+            except ImportError:
+                print(
+                    "[flow-doctor] WARNING: krepis package not installed, diagnosis "
+                    "disabled. Install with: pip install flow-doctor[router]",
+                    file=sys.stderr,
+                )
+        elif config.diagnosis.enabled and config.diagnosis.api_key:
             if config.diagnosis.provider == "openai_compat":
                 try:
                     from flow_doctor.diagnosis.provider import OpenAICompatProvider
@@ -687,8 +711,8 @@ class FlowDoctor:
                     )
             else:
                 raise ConfigError(
-                    f"diagnosis.provider must be 'anthropic' or 'openai_compat', "
-                    f"got '{config.diagnosis.provider}'"
+                    f"diagnosis.provider must be 'anthropic', 'openai_compat', or "
+                    f"'router', got '{config.diagnosis.provider}'"
                 )
 
     def _init_remediation(self, config: FlowDoctorConfig) -> None:
