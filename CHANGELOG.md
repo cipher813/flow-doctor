@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.13.0 (2026-08-12)
+
+### Changed (breaking)
+
+- **`diagnosis.base_url` no longer defaults to a provider endpoint.** It carried the literal `https://openrouter.ai/api/v1` in three places — `DiagnosisConfig.base_url`, the YAML parser's `diag_raw.get("base_url", ...)` fallback, and `FixGenerator.__init__` — so a deployment that set `provider: openai_compat` without naming an endpoint sent its context to OpenRouter silently, with nothing in its own configuration saying so.
+
+  That context is whatever the failure carried: tracebacks, log tails, source excerpts, and for auto-fix the full contents of the affected files and their tests. flow-doctor makes this call from inside its consumers' error path, unattended, at the moment least likely to be watched. A default destination is the wrong shape here even though it is convenient — a library that runs in your error path should not choose your inference vendor.
+
+  0.12.0 added `provider: router` as an opt-in alternative but deliberately left `anthropic` and `openai_compat` "working exactly as before", so the defaults survived it. **This release removes them.**
+
+  **The default is now `None` and an unset endpoint fails closed.** Diagnosis is disabled with the reason on stderr (the capture path must not raise into a consumer already handling a failure); `FixGenerator._complete_openai_compat` raises rather than letting the `openai` SDK fall back to its own default host; and the auto-fix CLI refuses before calling.
+
+  **If you relied on the old default**, set it explicitly to restore the previous behaviour:
+
+  ```yaml
+  diagnosis:
+    provider: openai_compat
+    base_url: https://openrouter.ai/api/v1
+  ```
+
+  `provider: anthropic` (the default) and `provider: router` are unaffected — neither ever read `base_url`.
+
+### Fixed
+
+- **Auto-fix no longer sends an Anthropic key to a route nobody selected under `provider: router`.** `fix/cli.py` mapped provider→credential with only `anthropic` and `openai_compat` in mind, so 0.12.0's `router` provider fell through to the `else` branch and used `ANTHROPIC_API_KEY`. A deployment that deliberately holds no direct provider credential must not have one substituted for it. It now refuses with an actionable message; full router support for the fix path is tracked separately.
+
+### Added
+
+- **A source-level guard** (`tests/test_endpoint_defaults.py::test_no_provider_endpoint_literal_in_package`) failing CI if any packaged module contains a provider endpoint URL in a reachable expression. The original defect spanned three modules with a fully green behavioural suite, because nothing asserted on what the default *was*.
+
 ## 0.12.0 (2026-08-12)
 
 ### Added

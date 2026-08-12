@@ -290,10 +290,29 @@ diagnosis:
   timeout_seconds: 30
   max_daily_cost_usd: 1.00
 
+# flow-doctor ships NO default endpoint. It runs inside your error path, on
+# data you did not choose to send (tracebacks, log tails, source excerpts), so
+# it will not pick an inference vendor for you. Name a destination in exactly
+# one of three ways; if none resolves, diagnosis is disabled with the reason on
+# stderr rather than falling back to somebody's API.
+#
 # `diagnosis.provider` also accepts `openai_compat` (any OpenAI-compatible
-# chat-completions endpoint — OpenRouter, OpenAI, self-hosted vLLM; set
-# `base_url` + `model` and drop `api_key` to use `FLOW_DOCTOR_*` env
-# fallbacks) and `router`:
+# chat-completions endpoint — your router, OpenAI, a self-hosted vLLM, an
+# inference vendor; `base_url` is REQUIRED, and drop `api_key` to use
+# `FLOW_DOCTOR_*` env fallbacks) and `router`:
+#
+# diagnosis:
+#   enabled: true
+#   provider: openai_compat
+#   base_url: https://your-endpoint.example/v1   # required — no default
+#   model: your-model
+#   price_in_per_1m: 0.50    # required unless the endpoint reports billed
+#   price_out_per_1m: 1.50   # cost, so the daily cap stays honest
+#
+# BREAKING in 0.13.0: `base_url` previously defaulted to a hardcoded OpenRouter
+# API URL, so `openai_compat` without one sent your diagnosis context there
+# silently. If you relied on that, set it explicitly — the value is in the
+# 0.13.0 CHANGELOG entry.
 #
 # diagnosis:
 #   enabled: true

@@ -14,9 +14,15 @@ class FixGenerator:
 
     ``provider`` mirrors ``DiagnosisConfig.provider``: ``"anthropic"`` (native
     SDK, the default) or ``"openai_compat"`` (any OpenAI-compatible
-    chat-completions endpoint — OpenRouter open-weight models, OpenAI,
-    self-hosted vLLM — selected via ``base_url``). Both transports run the
-    same prompts and return the same plain-text diff contract.
+    chat-completions endpoint — your router, OpenAI, a self-hosted vLLM, an
+    inference vendor — named by ``base_url``). Both transports run the same
+    prompts and return the same plain-text diff contract.
+
+    ``base_url`` has no default. It carried a hardcoded OpenRouter API URL
+    until 0.13.0, which meant an ``openai_compat`` generator constructed
+    without one shipped the contents of the affected source files — the
+    largest payload flow-doctor sends anywhere — to a vendor the caller never
+    named. An unset endpoint now fails closed at call time.
     """
 
     def __init__(
@@ -25,7 +31,7 @@ class FixGenerator:
         model: str = DEFAULT_DIAGNOSIS_MODEL,
         timeout_seconds: int = 60,
         provider: str = "anthropic",
-        base_url: str = "https://openrouter.ai/api/v1",
+        base_url: Optional[str] = None,
     ):
         if provider not in ("anthropic", "openai_compat"):
             raise ValueError(
@@ -58,6 +64,20 @@ class FixGenerator:
         return text
 
     def _complete_openai_compat(self, user_prompt: str) -> str:
+        # Checked BEFORE importing the transport: the config is invalid whether
+        # or not the optional `openai` extra is installed, and a guard that
+        # needs the dependency in order to refuse cannot run in the
+        # environment least likely to have it.
+        if not self.base_url:
+            # Fail closed. The openai SDK's own default points at OpenAI's API,
+            # so an unset base_url would not "do nothing" — it would send the
+            # caller's source files somewhere they never named.
+            raise ValueError(
+                "FixGenerator(provider='openai_compat') has no base_url. Set "
+                "diagnosis.base_url to the endpoint you want. flow-doctor "
+                "ships no default endpoint."
+            )
+
         from openai import OpenAI
 
         client = OpenAI(

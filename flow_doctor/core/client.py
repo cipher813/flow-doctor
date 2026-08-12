@@ -675,6 +675,24 @@ class FlowDoctor:
                 )
         elif config.diagnosis.enabled and config.diagnosis.api_key:
             if config.diagnosis.provider == "openai_compat":
+                if not config.diagnosis.base_url:
+                    # Fail closed. There is no default endpoint to fall into,
+                    # and picking one would mean sending this pipeline's
+                    # tracebacks to a third party the operator never named.
+                    # Disabled-with-a-reason rather than raised: this runs on
+                    # the capture path, which must not throw into a consumer
+                    # that is already handling a failure.
+                    print(
+                        "[flow-doctor] WARNING: diagnosis disabled — "
+                        "diagnosis.provider='openai_compat' requires "
+                        "diagnosis.base_url, and it is not set. Set it to the "
+                        "OpenAI-compatible endpoint you want, or use "
+                        "diagnosis.provider='router' with a model_group to "
+                        "resolve one through krepis. flow-doctor ships no "
+                        "default endpoint.",
+                        file=sys.stderr,
+                    )
+                    return
                 try:
                     from flow_doctor.diagnosis.provider import OpenAICompatProvider
                     self._diagnosis_provider = OpenAICompatProvider(

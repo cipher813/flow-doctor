@@ -164,10 +164,18 @@ class DiagnosisConfig(_ConfigModel):
     # ("low"/"med"/"high"/"ultra") — the model, endpoint and credential are
     # all resolved through krepis at call time, never held here.
     model_group: Optional[str] = None
-    # openai_compat only. base_url defaults to OpenRouter. The per-1M prices
-    # are REQUIRED for non-OpenRouter endpoints (OpenRouter reports its own
-    # billed cost) — they keep the max_daily_cost_usd cap honest.
-    base_url: str = "https://openrouter.ai/api/v1"
+    # openai_compat only, and REQUIRED for it.
+    #
+    # There is deliberately NO default. Until 0.13.0 this defaulted to a
+    # hardcoded OpenRouter API URL, so enabling openai_compat without setting
+    # it silently shipped tracebacks, log tails and source excerpts to a vendor
+    # the operator never named — from inside the error path of an unattended
+    # pipeline, which is the moment least likely to be watched. "Unset" now
+    # fails closed with an error naming how to set one.
+    #
+    # The per-1M prices are REQUIRED for endpoints that do not report their own
+    # billed cost — they keep the max_daily_cost_usd cap honest.
+    base_url: Optional[str] = None
     price_in_per_1m: Optional[float] = None
     price_out_per_1m: Optional[float] = None
     confidence_calibration: float = 0.85
@@ -512,7 +520,11 @@ def load_config(
             model=diag_raw.get("model", DEFAULT_DIAGNOSIS_MODEL),
             api_key=diag_raw.get("api_key"),
             model_group=diag_raw.get("model_group"),
-            base_url=diag_raw.get("base_url", "https://openrouter.ai/api/v1"),
+            # No fallback literal. The parser carried its own copy of the
+            # default, so fixing the model field alone would have left every
+            # file-configured deployment — which is most of them — still
+            # resolving to the old endpoint.
+            base_url=diag_raw.get("base_url"),
             price_in_per_1m=(
                 float(diag_raw["price_in_per_1m"])
                 if diag_raw.get("price_in_per_1m") is not None else None
