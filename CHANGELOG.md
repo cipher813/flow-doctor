@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.0 (2026-08-12)
+
+### Added
+
+- **`diagnosis.provider: router`** — resolves a krepis router capability class (`low`/`med`/`high`/`ultra`, `diagnosis.model_group`) instead of holding a direct Anthropic/OpenRouter key. For self-hosted installs nothing changes — `anthropic` and `openai_compat` keep working exactly as before with your own key. `router` is for deployments that are themselves a krepis consumer and must never hold a direct provider credential: `RouterProvider` resolves through `krepis.router.resolve_group_spec` and refuses to call anything outside the compelled routes (`litellm_proxy`, the authenticated edge; `egress_proxy`, its registry-derived DLP-scanned degraded route) — any other resolution, including a direct-provider fallback the router itself might otherwise choose, raises `RouterUnresolvable` rather than silently placing the call. New optional extra: `pip install flow-doctor[router]`.
+
 ## 0.8.8 (2026-07-28)
 
 ### Fixed

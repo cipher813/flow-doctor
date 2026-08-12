@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from abc import ABC, abstractmethod
 from typing import Optional
@@ -275,6 +276,62 @@ def _build_diagnosis(
     )
 
 
+def _call_openai_compat_chat(
+    *,
+    api_key: str,
+    model: str,
+    base_url: str,
+    timeout_seconds: int,
+    context: DiagnosisContext,
+    assembler: ContextAssembler,
+    opt_into_usage: bool,
+) -> tuple:
+    """Shared OpenAI-compatible chat-completions call.
+
+    Both :class:`OpenAICompatProvider` and :class:`RouterProvider` speak the
+    same wire format (OpenAI chat-completions) to a different endpoint —
+    OpenRouter/OpenAI/vLLM directly for the former, the krepis router edge
+    for the latter. Extracted so the request construction, JSON parsing and
+    usage extraction can't drift between the two.
+
+    Returns ``(response, text, parsed, input_tokens, output_tokens,
+    reported_cost, request_kwargs)``. ``reported_cost`` is ``None`` when the
+    endpoint didn't report ``usage.cost`` — callers decide how to price that.
+    """
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_seconds)
+
+    kwargs = {}
+    if opt_into_usage:
+        # Opt into usage accounting: usage.cost is the actually-billed USD
+        # figure. OpenRouter always supports this; LiteLLM proxies commonly
+        # do too (litellm.completion_cost surfaced via the same field).
+        kwargs["extra_body"] = {"usage": {"include": True}}
+
+    request_kwargs = dict(
+        model=model,
+        max_tokens=2048,
+        messages=[
+            {"role": "system", "content": assembler.system_prompt},
+            {"role": "user", "content": assembler.build_prompt(context)},
+        ],
+        **kwargs,
+    )
+    response = client.chat.completions.create(**request_kwargs)
+
+    text = (response.choices[0].message.content or "").strip()
+    parsed = AnthropicProvider._parse_json(text)
+
+    usage = getattr(response, "usage", None)
+    input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+    reported_cost = getattr(usage, "cost", None)
+    reported_cost = float(reported_cost) if reported_cost is not None else None
+
+    return response, text, parsed, input_tokens, output_tokens, reported_cost, request_kwargs
+
+
 class OpenAICompatProvider(DiagnosisProvider):
     """Diagnosis provider for any OpenAI-compatible chat-completions endpoint
     (OpenRouter for open-weight models, OpenAI itself, self-hosted vLLM).
@@ -322,40 +379,20 @@ class OpenAICompatProvider(DiagnosisProvider):
 
     def diagnose(self, context: DiagnosisContext, assembler: ContextAssembler) -> Diagnosis:
         """Call the OpenAI-compatible endpoint and parse the diagnosis JSON."""
-        from openai import OpenAI
-
-        client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout=self.timeout_seconds,
+        response, text, parsed, input_tokens, output_tokens, reported_cost, request_kwargs = (
+            _call_openai_compat_chat(
+                api_key=self.api_key,
+                model=self.model,
+                base_url=self.base_url,
+                timeout_seconds=self.timeout_seconds,
+                context=context,
+                assembler=assembler,
+                opt_into_usage=self._is_openrouter(),
+            )
         )
 
-        kwargs = {}
-        if self._is_openrouter():
-            # Opt into usage accounting: usage.cost is the actually-billed
-            # USD figure (canonical under :floor routing).
-            kwargs["extra_body"] = {"usage": {"include": True}}
-
-        request_kwargs = dict(
-            model=self.model,
-            max_tokens=2048,
-            messages=[
-                {"role": "system", "content": assembler.system_prompt},
-                {"role": "user", "content": assembler.build_prompt(context)},
-            ],
-            **kwargs,
-        )
-        response = client.chat.completions.create(**request_kwargs)
-
-        text = (response.choices[0].message.content or "").strip()
-        parsed = AnthropicProvider._parse_json(text)
-
-        usage = getattr(response, "usage", None)
-        input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-        output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-        reported_cost = getattr(usage, "cost", None)
         if reported_cost is not None:
-            cost = float(reported_cost)
+            cost = reported_cost
         elif self.price_in_per_1m is not None and self.price_out_per_1m is not None:
             cost = (
                 input_tokens * self.price_in_per_1m / 1_000_000
@@ -395,6 +432,188 @@ class OpenAICompatProvider(DiagnosisProvider):
         return _build_diagnosis(
             parsed, text, context,
             model=self.model,
+            tokens_used=input_tokens + output_tokens,
+            cost_usd=cost,
+            confidence_calibration=self.confidence_calibration,
+        )
+
+
+class RouterUnresolvable(RuntimeError):
+    """The configured ``model_group`` could not be resolved to a callable
+    endpoint through the krepis router.
+
+    A distinct type (mirrors ``morning_signal.claude.RouterGroupUnresolvable``
+    and ``model-router-policy`` R20) so callers never mistake "the router
+    could not be reached" for "the router was reached and declined" — this
+    always means the diagnosis call did not happen at all.
+    """
+
+
+#: Routes a diagnosis call may be served on — the COMPELLED PATHS, per
+#: `model-router-policy.md` §5 and mirroring
+#: `morning_signal.claude._COMPELLED_ROUTES`. `litellm_proxy` is the
+#: authenticated router edge (the normal case). `egress_proxy` is the
+#: registry-derived direct route a consumer degrades to when the edge's own
+#: health probe fails — still DLP-scanned, still a route the registry
+#: declared, so R26 holds. Anything else (a bare `openrouter`/`anthropic`
+#: direct route chosen by krepis's own fallback) is refused:
+#: alpha-engine-config-I6367 forbids direct-OpenRouter linkage, and the
+#: 2026-07-17 ruling sets the direct-Anthropic API budget to $0.
+_COMPELLED_ROUTES = frozenset({"litellm_proxy", "egress_proxy"})
+
+
+class RouterProvider(DiagnosisProvider):
+    """Diagnosis provider that resolves a krepis router capability class
+    (``low``/``med``/``high``/``ultra``) rather than addressing a model or
+    endpoint directly.
+
+    Optional — requires the ``krepis`` package (``pip install
+    flow-doctor[router]``), the same optional-dependency shape as the SFT
+    capture path above. flow-doctor is a self-hostable OSS tool: a self-hoster
+    with their own Anthropic/OpenRouter key keeps using ``AnthropicProvider``/
+    ``OpenAICompatProvider`` exactly as before. ``RouterProvider`` exists for
+    deployments that are themselves a krepis consumer (Nous Ergon's own
+    flow-doctor installs) and must not hold a direct provider key at all —
+    `model-router-policy.md` layer 5: a consumer applies the router's
+    resolution contract verbatim and holds no routing table of its own.
+
+    Fails closed (R20): any resolution failure — krepis missing, the group
+    unresolvable from this execution context, or resolution landing on
+    anything outside :data:`_COMPELLED_ROUTES` — raises
+    :class:`RouterUnresolvable` rather than falling back to a direct
+    provider or an ambient key. There is no fallback chain here the way
+    ``morning_signal`` has one; a diagnosis call skipped this cycle is a
+    contained failure, so fail-closed is strictly correct with no cost.
+    """
+
+    def __init__(
+        self,
+        model_group: str,
+        confidence_calibration: float = 0.85,
+        timeout_seconds: int = 30,
+        sft_sink_path: Optional[str] = None,
+    ):
+        self.model_group = model_group
+        self.confidence_calibration = confidence_calibration
+        self.timeout_seconds = timeout_seconds
+        self.sft_sink_path = sft_sink_path
+
+    def _resolve(self):
+        """Resolve ``self.model_group`` to a callable ``(base_url, api_key,
+        model, route)`` via krepis. Raises :class:`RouterUnresolvable` on any
+        failure — never returns a partial or guessed result.
+        """
+        try:
+            from krepis.router import resolve_group_spec
+        except ImportError as exc:
+            raise RouterUnresolvable(
+                f"krepis is not installed, so router group {self.model_group!r} "
+                f"cannot be resolved. Install with: pip install flow-doctor[router]"
+            ) from exc
+
+        # Declared, never inferred (model-router-policy R29). None hands the
+        # decision to krepis's own documented default rather than guessing
+        # here from a hostname or metadata lookup.
+        exec_context = os.environ.get("KREPIS_EXEC_CONTEXT") or None
+        try:
+            edge_spec, route = resolve_group_spec(
+                self.model_group,
+                exec_context=exec_context,
+                # The router edge speaks OpenAI-compatible chat completions
+                # (see _call_openai_compat_chat); asking for the anthropic
+                # wire would hand back a URL this transport cannot speak.
+                wire="openai",
+                max_tokens=2048,
+            )
+        except Exception as exc:
+            raise RouterUnresolvable(
+                f"router group {self.model_group!r} did not resolve "
+                f"(exec_context={exec_context!r}): {exc}"
+            ) from exc
+
+        resolved_route = route.get("route")
+        if resolved_route not in _COMPELLED_ROUTES:
+            raise RouterUnresolvable(
+                f"router group {self.model_group!r} resolved to route "
+                f"{resolved_route!r} (provider={edge_spec.provider!r}), which "
+                f"is not a compelled path — refusing to call a direct "
+                f"provider chosen by fallback (alpha-engine-config-I6367). "
+                f"Compelled routes: {sorted(_COMPELLED_ROUTES)}"
+            )
+
+        if resolved_route != "litellm_proxy":
+            print(
+                f"[flow-doctor] DEGRADED: router group {self.model_group!r} "
+                f"resolved to route {resolved_route!r} (provider="
+                f"{edge_spec.provider!r} model={edge_spec.model!r}) rather "
+                f"than the authenticated edge — the edge's health probe did "
+                f"not pass. This is the registry-derived degraded route "
+                f"(model-router-policy §5), still the compelled path.",
+                file=sys.stderr,
+            )
+
+        return edge_spec
+
+    def diagnose(self, context: DiagnosisContext, assembler: ContextAssembler) -> Diagnosis:
+        """Resolve the router group, then call the resolved endpoint.
+
+        Uses ``krepis.llm.LLMClient`` rather than a hand-rolled OpenAI
+        client: it owns the router-edge credential chain (env var, then the
+        per-consumer SSM secret — ``_resolve_api_key`` in ``krepis.llm``),
+        which this provider must not reimplement, and ``krepis.cost
+        .record_llm_call`` prices the response off the registry's own price
+        card when the edge doesn't report ``usage.cost`` — correct for a
+        route that can resolve to any of several models, where no single
+        static price is knowable ahead of the call.
+        """
+        edge_spec = self._resolve()
+        from krepis.llm import LLMClient
+
+        client = LLMClient(
+            edge_spec,
+            callsite_id="flow_doctor_diagnosis",
+            timeout=float(self.timeout_seconds),
+            max_retries=0,
+        )
+        result = client.complete(
+            system=assembler.system_prompt,
+            user_content=assembler.build_prompt(context),
+            max_tokens=2048,
+            cache_system=True,
+            on_unsupported="drop",
+        )
+
+        text = result.text
+        parsed = AnthropicProvider._parse_json(text)
+
+        from krepis.cost import record_llm_call
+
+        cost_record = record_llm_call(result, extra_fields={"callsite_id": "flow_doctor_diagnosis"})
+        cost = float(cost_record.get("cost_usd") or 0.0)
+        input_tokens = int(getattr(result.usage, "input_tokens", 0) or 0)
+        output_tokens = int(getattr(result.usage, "output_tokens", 0) or 0)
+
+        _capture_sft_record(
+            sink_path=self.sft_sink_path,
+            raw_request=result.raw_request,
+            raw_response=result.raw_response,
+            text=text,
+            model=result.model,
+            provider="router",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost,
+            meta={
+                "provider": "router",
+                "model_group": self.model_group,
+                "flow_name": context.flow_name,
+                "cost_source": cost_record.get("cost_source"),
+            },
+        )
+
+        return _build_diagnosis(
+            parsed, text, context,
+            model=result.model,
             tokens_used=input_tokens + output_tokens,
             cost_usd=cost,
             confidence_calibration=self.confidence_calibration,
