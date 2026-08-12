@@ -272,6 +272,31 @@ def generate_fix(
 
     # Generate fix via LLM — same provider/base_url the diagnosis runs on.
     provider = config.diagnosis.provider
+
+    # `provider: router` is a diagnosis-side capability only: `RouterProvider`
+    # drives `krepis.llm.LLMClient`, which `FixGenerator` does not use, and the
+    # branch below would otherwise fall through to `else` and send an Anthropic
+    # key to a route nobody selected. Refuse instead — a deployment that
+    # deliberately holds no direct provider credential must not have one
+    # substituted for it here. Tracked: alpha-engine-config-I7014.
+    if provider == "router":
+        msg = (
+            "Auto-fix does not support diagnosis.provider='router' yet — "
+            "FixGenerator has no krepis transport. Set auto_fix.enabled=false, "
+            "or configure a direct diagnosis provider for the fix path."
+        )
+        _comment_failure(repo, issue_number, token, msg)
+        return (FixOutcome.FAILED, msg)
+
+    if provider == "openai_compat" and not config.diagnosis.base_url:
+        # Same fail-closed rule as the diagnosis path: no default endpoint.
+        msg = (
+            "diagnosis.provider='openai_compat' requires diagnosis.base_url "
+            "and it is not set. flow-doctor ships no default endpoint."
+        )
+        _comment_failure(repo, issue_number, token, msg)
+        return (FixOutcome.FAILED, msg)
+
     key_env = "OPENROUTER_API_KEY" if provider == "openai_compat" else "ANTHROPIC_API_KEY"
     api_key = (
         config.diagnosis.api_key
