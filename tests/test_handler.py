@@ -248,6 +248,122 @@ class TestGetHandler:
         handler.close()
 
 
+class TestSelfExclusion:
+    """alpha-engine-config-I7276: the handler is attached to the ROOT
+    logger, and every flow-doctor module logs to the "flow_doctor" logger
+    (or a "flow_doctor.*" child), including the CRITICAL a notifier
+    failure raises. Without self-exclusion that CRITICAL is re-captured as
+    a NEW report, which dispatches, which can fail the same notifier,
+    which logs another CRITICAL — an unbounded loop. This is the test
+    that must FAIL against the pre-fix handler (verified: it produced 1
+    report from flow-doctor's own CRITICAL instead of 0, before
+    handler.py's self-exclusion check existed)."""
+
+    def test_own_logger_critical_produces_no_report(self):
+        fd, _ = _make_fd()
+        handler = FlowDoctorHandler(fd, level=logging.ERROR)
+        logging.getLogger().addHandler(handler)
+
+        try:
+            logging.getLogger("flow_doctor").critical(
+                "flow-doctor notifier s3_alert returned failure for report X"
+            )
+        finally:
+            logging.getLogger().removeHandler(handler)
+            _flush(handler)
+
+        reports = fd.history(limit=10)
+        assert len(reports) == 0, (
+            f"flow-doctor's own CRITICAL produced {len(reports)} report(s) "
+            "instead of 0 — this is the self-capture amplification loop."
+        )
+
+    def test_child_logger_critical_produces_no_report(self):
+        """record.name is a structural match ("flow_doctor" or a
+        "flow_doctor." prefix), not a message-text match — every
+        notify/*.py module logs on a name of exactly "flow_doctor" today,
+        but a child logger (e.g. "flow_doctor.notify.s3") must be excluded
+        too, since the fix is defined on the logger hierarchy, not a
+        specific string."""
+        fd, _ = _make_fd()
+        handler = FlowDoctorHandler(fd, level=logging.ERROR)
+        logging.getLogger().addHandler(handler)
+
+        try:
+            logging.getLogger("flow_doctor.notify.s3").critical(
+                "S3Notifier.send failed"
+            )
+        finally:
+            logging.getLogger().removeHandler(handler)
+            _flush(handler)
+
+        reports = fd.history(limit=10)
+        assert len(reports) == 0
+
+    def test_other_logger_critical_still_captured(self):
+        """Self-exclusion must not become a blanket bypass — a CRITICAL
+        from an unrelated logger (the pipeline flow-doctor is monitoring)
+        is still captured, matching the CRITICAL-logs-are-correct guidance
+        in I7276: the bug is flow-doctor capturing ITS OWN logs, not
+        capture in general."""
+        fd, _ = _make_fd()
+        handler = FlowDoctorHandler(fd, level=logging.ERROR)
+        logging.getLogger().addHandler(handler)
+
+        try:
+            logging.getLogger("some.other.pipeline").critical("real failure")
+        finally:
+            logging.getLogger().removeHandler(handler)
+            _flush(handler)
+
+        reports = fd.history(limit=10)
+        assert len(reports) == 1
+        assert reports[0].error_message == "real failure"
+
+
+class TestOneAlertPerNotifierFailure:
+    """alpha-engine-config-I7276: one underlying notifier failure must
+    produce exactly one operator-visible flow-doctor report — not the
+    original report PLUS N synthetic reports about the notifier failure
+    itself feeding back through the root logger."""
+
+    def test_notifier_failure_does_not_amplify(self):
+        from flow_doctor.core.handler import FlowDoctorHandler as _H
+
+        class _AlwaysFailsNotifier:
+            """Mimics a real notifier's failure path: raises, and the
+            caller (FlowDoctor._dispatch, matching client.py) logs a
+            CRITICAL on the "flow_doctor" logger about it — the exact
+            shape that produced the live alert storm."""
+
+            notify_on = None
+            notify_on_category = None
+            notify_on_cascade = False
+            last_error = None
+
+            def send(self, report, flow_name, diagnosis=None):
+                raise RuntimeError("S3 bucket unreachable: connection refused")
+
+        fd, _ = _make_fd(dedup_cooldown_minutes=0)
+        handler = _H(fd, level=logging.ERROR)
+        logging.getLogger().addHandler(handler)
+        fd._notifiers = [_AlwaysFailsNotifier()]
+
+        try:
+            fd.report("original pipeline failure", severity="critical")
+        finally:
+            logging.getLogger().removeHandler(handler)
+            _flush(handler)
+
+        reports = fd.history(limit=20)
+        assert len(reports) == 1, (
+            f"expected exactly 1 operator-visible report, got {len(reports)}: "
+            f"{[r.error_message for r in reports]} — a notifier failure must "
+            "not amplify into additional reports."
+        )
+        assert reports[0].error_message == "original pipeline failure"
+
+
 class TestShutdown:
     def test_shutdown_drains_queue(self):
         fd, _ = _make_fd(dedup_cooldown_minutes=0)

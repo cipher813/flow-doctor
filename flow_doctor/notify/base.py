@@ -41,6 +41,20 @@ class Notifier(ABC):
     # attribute and need not set it.
     notify_on_cascade: bool = False
 
+    # Set by ``send()`` on its most recent call: ``None`` after a success,
+    # a short human-readable reason after a failure (alpha-engine-config-
+    # I7276). The dispatcher (``FlowDoctor._dispatch``) reads this after a
+    # falsy ``send()`` return so the ONE operator-visible CRITICAL it logs
+    # names the actual cause instead of deferring to a per-notifier log
+    # line the operator may never see (WARNING is below the handler's
+    # capture threshold; a notifier's own CRITICAL is now excluded from
+    # producing a new report by the self-exclusion fix in handler.py, so it
+    # only reaches whatever raw log sink the host app has configured).
+    # Every concrete notifier's send() MUST set this on every failure
+    # return/raise and clear it (None) at the top of send() — see any
+    # notify/*.py for the pattern.
+    last_error: Optional[str] = None
+
     @abstractmethod
     def send(
         self,
@@ -64,6 +78,12 @@ class Notifier(ABC):
             Callers should use truthiness (``if send(...)``) to distinguish
             success from failure, and use the value to construct follow-up
             links when it is non-empty.
+
+            Implementations MUST set ``self.last_error`` to a short
+            human-readable reason on every failure path (exception or
+            plain falsy return), and clear it to ``None`` at the start of
+            ``send()`` so a reused instance never reports a stale reason
+            for what turns out to be a success.
         """
 
     def validate(self) -> None:

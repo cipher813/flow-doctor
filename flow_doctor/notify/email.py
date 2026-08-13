@@ -37,6 +37,7 @@ class EmailNotifier(Notifier):
         flow_name: str,
         diagnosis: Optional[Diagnosis] = None,
     ) -> Optional[str]:
+        self.last_error = None
         try:
             subject = f"[Flow Doctor] [{report.severity.upper()}] {flow_name}"
             if report.error_type:
@@ -59,6 +60,7 @@ class EmailNotifier(Notifier):
             # who got the email without digging through SMTP logs.
             return ", ".join(self.recipients)
         except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
             _logger.critical(
                 "flow-doctor email notification failed (sender=%s, host=%s): %s",
                 self.sender, self.smtp_host, e, exc_info=True,

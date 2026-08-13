@@ -51,6 +51,26 @@ class FlowDoctorHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         """Enqueue the record for async processing. Never raises."""
         try:
+            # Self-exclusion — structural, not pattern-based. This handler is
+            # attached to the ROOT logger (see class docstring), and every
+            # flow-doctor module (client.py, notify/*.py) logs to the
+            # "flow_doctor" logger, including the CRITICAL a notifier
+            # failure raises. Without this check, that CRITICAL is
+            # re-captured as a NEW report, which is dispatched, which can
+            # fail the same notifier, which logs another CRITICAL — an
+            # unbounded loop (alpha-engine-config-I7276: one underlying S3
+            # write failure produced "far too many" alerts).
+            #
+            # This is deliberately record.name, not a default
+            # exclude_patterns message regex: message text is caller-
+            # controlled prose that drifts (someone rewords a log line and
+            # the exclusion silently stops matching); record.name is
+            # structural — it names the logger, not what it said, and a
+            # child logger like "flow_doctor.notify.s3" is still covered by
+            # the startswith check.
+            if record.name == "flow_doctor" or record.name.startswith("flow_doctor."):
+                return
+
             msg = record.getMessage()
 
             # Pattern filtering

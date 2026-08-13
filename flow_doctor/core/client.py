@@ -1592,6 +1592,22 @@ class FlowDoctor:
             # from the DB.
             try:
                 target = notifier.send(report, self.config.flow_name, diagnosis)
+                if not target:
+                    # Carry the cause (alpha-engine-config-I7276): every
+                    # notifier sets self.last_error on its failure path
+                    # (return-None or raise), so the ONE CRITICAL the
+                    # operator sees names the actual reason instead of
+                    # deferring to a per-notifier log line that may be
+                    # below the handler's capture threshold (WARNING) or,
+                    # post self-exclusion, never re-enters flow-doctor's
+                    # own report pipeline at all.
+                    reason = getattr(notifier, "last_error", None) or (
+                        "no reason reported by notifier "
+                        f"({type(notifier).__name__}.send returned a falsy "
+                        "target without setting last_error)"
+                    )
+                else:
+                    reason = None
                 action = Action(
                     flow_name=self.config.flow_name,
                     report_id=report.id,
@@ -1599,14 +1615,14 @@ class FlowDoctor:
                     status=ActionStatus.SENT.value if target else ActionStatus.FAILED.value,
                     target=target,
                     diagnosis_id=diagnosis.id if diagnosis else None,
+                    metadata={"failure_reason": reason} if reason else None,
                 )
                 self._store.save_action(action)
                 if not target:
                     failed.append(action_type)
                     _logger.critical(
-                        "flow-doctor notifier %s returned failure for report %s "
-                        "(notifier-specific reason logged separately)",
-                        action_type, report.id,
+                        "flow-doctor notifier %s returned failure for report %s: %s",
+                        action_type, report.id, reason,
                     )
                 else:
                     sent += 1
@@ -1616,6 +1632,7 @@ class FlowDoctor:
                     )
             except Exception as e:
                 failed.append(action_type)
+                reason = f"{type(e).__name__}: {e}"
                 _logger.critical(
                     "flow-doctor notifier %s raised while sending report %s: %s",
                     action_type, report.id, e, exc_info=True,
@@ -1626,6 +1643,7 @@ class FlowDoctor:
                     action_type=action_type,
                     status=ActionStatus.FAILED.value,
                     diagnosis_id=diagnosis.id if diagnosis else None,
+                    metadata={"failure_reason": reason},
                 )
                 self._store.save_action(action)
 
