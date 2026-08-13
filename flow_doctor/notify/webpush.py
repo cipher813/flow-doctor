@@ -98,9 +98,14 @@ class WebPushNotifier(Notifier):
         flow_name: str,
         diagnosis: Optional[Diagnosis] = None,
     ) -> Optional[str]:
+        self.last_error = None
         try:
             from krepis.webpush import send_push
         except ImportError:
+            self.last_error = (
+                "krepis[webpush] is not installed "
+                "(pip install 'flow-doctor[webpush]')"
+            )
             _logger.critical(
                 "flow-doctor Web Push notification failed: krepis[webpush] "
                 "is not installed (pip install 'flow-doctor[webpush]')"
@@ -117,11 +122,14 @@ class WebPushNotifier(Notifier):
                 vapid_subject=self.vapid_subject,
             )
         except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
             _logger.critical(
                 "flow-doctor Web Push notification failed: %s", e, exc_info=True,
             )
             print(f"[flow-doctor] Web Push notification failed: {e}", file=sys.stderr)
             return None
+        if not ok:
+            self.last_error = "krepis.webpush.send_push returned False"
         return self._target_id() if ok else None
 
 

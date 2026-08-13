@@ -90,6 +90,7 @@ class GitHubNotifier(Notifier):
         flow_name: str,
         diagnosis: Optional[Diagnosis] = None,
     ) -> Optional[str]:
+        self.last_error = None
         try:
             title = self._format_title(report, flow_name, diagnosis)
             body = self._format_body(report, flow_name, diagnosis)
@@ -126,12 +127,16 @@ class GitHubNotifier(Notifier):
                     if self.auto_fix_pr and issue_number is not None:
                         self._add_labels(issue_number, [self.fix_label])
                     return issue_url or f"https://github.com/{self.repo}/issues"
+                self.last_error = (
+                    f"GitHub issue creation returned HTTP {resp.status} for repo {self.repo}"
+                )
                 _logger.critical(
                     "flow-doctor GitHub issue creation returned HTTP %s for repo %s",
                     resp.status, self.repo,
                 )
                 return None
         except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
             # Log via Python logging at CRITICAL so host apps see it in their
             # log stream (journalctl/Sentry/Datadog). Also keep the stderr
             # print for shells without structured logging configured.

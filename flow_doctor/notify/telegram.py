@@ -104,13 +104,19 @@ class TelegramNotifier(Notifier):
 
         if krepis_send is not None and mode in (None, "Markdown", "MarkdownV2"):
             # krepis handles Markdown v1 escape + optional forum topic routing.
-            return krepis_send(
+            ok = krepis_send(
                 text,
                 disable_notification=bool(quiet),
                 bot_token=self.bot_token,
                 chat_id=self.chat_id,
                 message_thread_id=self.message_thread_id,
             )
+            if not ok:
+                # krepis_send raises on error and only returns a plain bool
+                # on the request path, so a False here carries no detail
+                # beyond "the krepis transport reported failure."
+                self.last_error = "krepis.telegram.send_message returned False"
+            return ok
 
         payload: dict = {
             "chat_id": self.chat_id,
@@ -133,6 +139,7 @@ class TelegramNotifier(Notifier):
             )
             with urlopen(req, timeout=10) as resp:
                 if resp.status != 200:
+                    self.last_error = f"Telegram API returned HTTP {resp.status}"
                     _logger.critical(
                         "flow-doctor Telegram API returned HTTP %s", resp.status,
                     )
@@ -141,15 +148,19 @@ class TelegramNotifier(Notifier):
                 try:
                     parsed = json.loads(body)
                 except json.JSONDecodeError:
+                    self.last_error = "Telegram API returned non-JSON response"
                     return False
                 if not parsed.get("ok"):
+                    reason = parsed.get("description", "unknown")
+                    self.last_error = f"Telegram API returned ok=false: {reason}"
                     _logger.critical(
                         "flow-doctor Telegram API returned ok=false: %s",
-                        parsed.get("description", "unknown"),
+                        reason,
                     )
                     return False
                 return True
         except URLError as e:
+            self.last_error = f"{type(e).__name__}: {e}"
             _logger.critical(
                 "flow-doctor Telegram notification failed (network): %s",
                 e, exc_info=True,
@@ -160,6 +171,7 @@ class TelegramNotifier(Notifier):
             )
             return False
         except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
             _logger.critical(
                 "flow-doctor Telegram notification failed: %s",
                 e, exc_info=True,
@@ -176,6 +188,7 @@ class TelegramNotifier(Notifier):
         flow_name: str,
         diagnosis: Optional[Diagnosis] = None,
     ) -> Optional[str]:
+        self.last_error = None
         try:
             text = self._format_message(report, flow_name, diagnosis)
             text = _truncate(text)
@@ -183,6 +196,7 @@ class TelegramNotifier(Notifier):
                 return self._target_id()
             return None
         except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
             _logger.critical(
                 "flow-doctor Telegram notification failed: %s",
                 e, exc_info=True,

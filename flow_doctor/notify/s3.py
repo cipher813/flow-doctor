@@ -99,6 +99,7 @@ class S3Notifier(Notifier):
         flow_name: str,
         diagnosis: Optional[Diagnosis] = None,
     ) -> Optional[str]:
+        self.last_error = None
         try:
             entry = self._build_entry(report, flow_name, diagnosis)
             key = self._s3_key(entry)
@@ -110,6 +111,7 @@ class S3Notifier(Notifier):
             )
             return target
         except Exception as exc:  # noqa: BLE001
+            self.last_error = f"{type(exc).__name__}: {exc}"
             _logger.warning(
                 "S3Notifier.send failed for flow=%s: %s: %s",
                 flow_name, type(exc).__name__, exc,
