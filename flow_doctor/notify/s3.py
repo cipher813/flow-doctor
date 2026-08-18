@@ -76,7 +76,15 @@ class S3Notifier(Notifier):
     Uses the calling process's AWS credentials (Lambda execution role,
     EC2 instance role, or local CLI creds) — no auth config in the
     notifier itself.
+
+    An archival sink, not a paging channel: it records every occurrence
+    of an error signature, including ones ``FlowDoctor`` suppresses for
+    delivery under dedup cooldown (alpha-engine-config-I7663), so the
+    corpus stays a census of what happened rather than a sample of what
+    got paged.
     """
+
+    records_on_dedup = True
 
     def __init__(
         self,
