@@ -85,6 +85,41 @@ def test_notify_success_persists_an_info_report(fd):
     assert any(r.id == rid and r.severity == "info" for r in saved)
 
 
+# --- dedup: recording vs delivery (alpha-engine-config-I7663) -----------
+
+
+def test_dedup_hit_skips_ordinary_notifier_but_reaches_recording_one(fd):
+    """A dedup hit must suppress delivery but still reach an archival sink."""
+    delivery = _RecordingNotifier()
+    recording = _RecordingNotifier()
+    recording.records_on_dedup = True
+    fd._notifiers = [delivery, recording]
+
+    id1 = fd.report("Identical error message", severity="error")
+    id2 = fd.report("Identical error message", severity="error")
+
+    assert id1 is not None
+    assert id2 is None  # still suppressed for the caller
+    assert delivery.received == ["error"]  # delivered once, not twice
+    assert recording.received == ["error", "error"]  # recorded both times
+
+
+def test_dedup_hit_on_notify_event_also_reaches_recording_notifier():
+    f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    fd = FlowDoctor.builder("routing-test-event").with_store(path=f.name).build()
+    recording = _RecordingNotifier()
+    recording.records_on_dedup = True
+    recording.notify_on = {"warning"}
+    fd._notifiers = [recording]
+
+    id1 = fd.notify_event("Milestone reached", severity="warning", dedup_key="same-key")
+    id2 = fd.notify_event("Milestone reached", severity="warning", dedup_key="same-key")
+
+    assert id1 is not None
+    assert id2 is None
+    assert recording.received == ["warning", "warning"]
+
+
 def test_config_notify_on_flows_through_to_notifier_instance():
     """notify_on declared on a typed config must land on the built
     notifier instance so the dispatcher can route by it."""

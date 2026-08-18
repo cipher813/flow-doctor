@@ -807,7 +807,11 @@ class FlowDoctor:
             message: Explicit message string (alternative to passing a string as error).
 
         Returns:
-            The report ID, or None if suppressed by dedup.
+            The report ID, or None if suppressed by dedup. A dedup-suppressed
+            occurrence still reaches archival-sink notifiers (``records_on_
+            dedup=True``, e.g. ``S3Notifier``) even though delivery notifiers
+            are skipped and no new store row is written — see the dedup
+            branch below.
         """
         try:
             return self._do_report(error, severity=severity, context=context, logs=logs, message=message)
@@ -979,6 +983,21 @@ class FlowDoctor:
                     error_signature=error_signature,
                     reason=DecisionReason.DEDUPED.value,
                 )
+                # Delivery is suppressed; archival sinks still record this
+                # occurrence (alpha-engine-config-I7663) — see _do_report's
+                # matching branch for the full rationale.
+                dedup_report = Report(
+                    flow_name=self.config.flow_name,
+                    severity=severity,
+                    error_message=subject,
+                    logs=body,
+                    context=enriched_context,
+                    error_signature=error_signature,
+                    id=existing_id,
+                )
+                self._send_notifications(
+                    dedup_report, is_cascade=False, diagnosis=None, recording_only=True
+                )
                 return None
 
         report = Report(
@@ -1119,7 +1138,13 @@ class FlowDoctor:
             traceback_str = self._scrubber.scrub_string(traceback_str)
         enriched_context = self._build_context(context)
 
-        # Dedup check
+        # Dedup check. A hit skips DELIVERY (email/Telegram/GitHub) but still
+        # gives archival sinks (S3Notifier, records_on_dedup=True) a chance
+        # at this occurrence — alpha-engine-config-I7663: suppression is a
+        # delivery decision, never a recording one. This dedup_report is
+        # deliberately not passed to self._store.save_report — the canonical
+        # Report row for this signature is the original's, tracked via its
+        # dedup_count counter; only the archival-sink notifiers see this one.
         is_dup, existing_id = self._dedup.is_duplicate(error_signature)
         if is_dup and existing_id:
             self._dedup.record_dedup_hit(existing_id)
@@ -1127,6 +1152,20 @@ class FlowDoctor:
                 report_id=existing_id,
                 error_signature=error_signature,
                 reason=DecisionReason.DEDUPED.value,
+            )
+            dedup_report = Report(
+                flow_name=self.config.flow_name,
+                severity=severity,
+                error_type=error_type,
+                error_message=error_message,
+                traceback=traceback_str,
+                logs=captured_logs,
+                context=enriched_context,
+                error_signature=error_signature,
+                id=existing_id,
+            )
+            self._send_notifications(
+                dedup_report, is_cascade=False, diagnosis=None, recording_only=True
             )
             return None
 
@@ -1485,6 +1524,7 @@ class FlowDoctor:
         report: Report,
         is_cascade: bool,
         diagnosis: Optional[Diagnosis] = None,
+        recording_only: bool = False,
     ) -> Dict[str, int]:
         """Send notifications, respecting rate limits.
 
@@ -1519,6 +1559,13 @@ class FlowDoctor:
         notifier fires as if ``notify_on_category`` were unset — a report
         that failed to get diagnosed must never be silently dropped by a
         gate that depends on that diagnosis.
+
+        ``recording_only`` (alpha-engine-config-I7663): when True, only
+        notifiers with ``records_on_dedup=True`` (archival sinks like
+        ``S3Notifier``) participate — every other notifier is skipped before
+        the severity/category/cascade gates. Used for dedup-suppressed
+        reports so an unchanged, still-recurring signature keeps landing in
+        the durable record even on days nothing was delivered.
         """
         attempted = 0
         sent = 0
@@ -1529,6 +1576,9 @@ class FlowDoctor:
         failed: List[str] = []
 
         for notifier in self._notifiers:
+            if recording_only and not notifier.records_on_dedup:
+                continue
+
             effective_notify_on = notifier.notify_on or _DEFAULT_NOTIFY_ON
             if report.severity not in effective_notify_on:
                 severity_skipped += 1

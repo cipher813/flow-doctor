@@ -41,6 +41,19 @@ class Notifier(ABC):
     # attribute and need not set it.
     notify_on_cascade: bool = False
 
+    # Recording-vs-delivery split (alpha-engine-config-I7663): when a report
+    # is a dedup hit — same signature already notified within the cooldown —
+    # ``FlowDoctor`` skips the delivery notifiers (email/Telegram/GitHub) but
+    # still gives durable archival sinks a chance to record the occurrence,
+    # so a still-open, still-recurring defect stays queryable across every
+    # day it fires even on days nothing was sent. Only a notifier with this
+    # set True is called on a dedup hit; ``send()`` receives the same Report
+    # either way and cannot tell the difference. Defaults False — a normal
+    # delivery channel is unaffected and continues to fire only on a fresh
+    # signature. Custom notifier subclasses inherit this attribute and need
+    # not set it.
+    records_on_dedup: bool = False
+
     # Set by ``send()`` on its most recent call: ``None`` after a success,
     # a short human-readable reason after a failure (alpha-engine-config-
     # I7276). The dispatcher (``FlowDoctor._dispatch``) reads this after a
