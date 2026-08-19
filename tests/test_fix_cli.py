@@ -113,8 +113,10 @@ store:
   path: %s
 diagnosis:
   enabled: true
+  provider: openai_compat
+  base_url: http://fake.internal/v1
   model: claude-haiku-4-5
-  api_key: ${ANTHROPIC_API_KEY}
+  api_key: ${OPENROUTER_API_KEY}
 auto_fix:
   enabled: true
   model: claude-haiku-4-5
@@ -135,7 +137,7 @@ auto_fix:
     for var in ("UNSET_EMAIL_SENDER", "UNSET_EMAIL_RECIPIENTS",
                 "UNSET_GMAIL_APP_PASSWORD", "UNSET_FLOW_DOCTOR_GITHUB_TOKEN"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
 
     with patch("flow_doctor.fix.cli.fetch_issue", return_value=issue), \
          patch("flow_doctor.fix.cli.GitHubNotifier.comment_on_issue"):

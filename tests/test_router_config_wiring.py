@@ -51,5 +51,5 @@ def test_unknown_diagnosis_provider_still_rejected():
     with tempfile.NamedTemporaryFile(suffix=".db") as f:
         config = _config(f.name, enabled=True, provider="bogus", api_key="k")
 
-        with pytest.raises(ConfigError, match="'anthropic', 'openai_compat', or 'router'"):
+        with pytest.raises(ConfigError, match="'router' or 'openai_compat'"):
             FlowDoctor(config, strict=True)

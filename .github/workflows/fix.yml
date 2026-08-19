@@ -49,9 +49,18 @@ on:
         type: string
         default: ""
     secrets:
-      ANTHROPIC_API_KEY:
-        description: "Anthropic API key for the Haiku fix model"
-        required: true
+      # `diagnosis.provider: anthropic` was REMOVED in 0.15.0 (flow-doctor no
+      # longer depends on the `anthropic` distribution or constructs a
+      # direct-Anthropic client anywhere). This secret is now provider-
+      # neutral: set it when the caller's flow-doctor.yaml uses
+      # `provider: openai_compat` (any OpenAI-compatible endpoint — the env
+      # var below matches `OPENROUTER_API_KEY`, which flow_doctor.fix.cli
+      # reads as its api_key fallback). NOT required when the caller uses
+      # `provider: router` — krepis resolves its own credential, and the
+      # caller's environment must already carry whatever that requires.
+      OPENROUTER_API_KEY:
+        description: "API key for the openai_compat fix transport (unused, and not required, under provider: router)"
+        required: false
 
 jobs:
   generate-fix:
@@ -83,7 +92,7 @@ jobs:
       - name: Generate fix
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
           CONFIG_PATH: ${{ inputs.config-path }}

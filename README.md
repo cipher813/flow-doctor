@@ -395,8 +395,9 @@ FLOW_DOCTOR_TELEGRAM_CHAT_ID=-1001234567890
 | `FLOW_DOCTOR_SMTP_RECIPIENTS` | Email notifier | `FLOW_DOCTOR_SMTP_RECIPIENTS` → `EMAIL_RECIPIENTS` | Email notifier config has no explicit `recipients` field |
 | `FLOW_DOCTOR_SLACK_WEBHOOK` | Slack notifier | `FLOW_DOCTOR_SLACK_WEBHOOK` → `SLACK_WEBHOOK_URL` | Slack notifier config has no explicit `webhook_url` field |
 | `FLOW_DOCTOR_S3_BUCKET` | S3 notifier | `FLOW_DOCTOR_S3_BUCKET` → `CHANGELOG_BUCKET` | S3 notifier config has no explicit `bucket` field |
-| `FLOW_DOCTOR_ANTHROPIC_API_KEY` | LLM diagnosis, auto-fix generator | `FLOW_DOCTOR_ANTHROPIC_API_KEY` → `ANTHROPIC_API_KEY` | `diagnosis.enabled: true` or auto-fix is on |
 | `FLOW_DOCTOR_SKIP_PREFLIGHT` | All notifiers' `validate()` | (literal) | Set to `1` in tests / offline boot to bypass token/preflight network calls |
+
+LLM diagnosis / auto-fix credentials are **not** part of this fallback contract — `diagnosis.api_key` (and, for `provider: openai_compat`, `diagnosis.base_url`) are set directly in `flow-doctor.yaml`, typically via its own `${VAR}` substitution (e.g. `api_key: ${OPENROUTER_API_KEY}`); `provider: router` needs no `api_key` at all — krepis resolves its own credential. There was a `FLOW_DOCTOR_ANTHROPIC_API_KEY` fallback here before 0.15.0; it was dead code (never wired to anything) and was removed along with the rest of the direct-Anthropic transport.
 
 **Precedence** for every field is: explicit value in kwargs/yaml → canonical `FLOW_DOCTOR_*` env var → convention fallbacks in the order listed. The first non-empty value wins. Missing values raise `ConfigError` at construction time naming the specific field and the env vars that would satisfy it.
 
@@ -583,10 +584,13 @@ jobs:
 
 Inputs (all optional) let you override `python-version`, `requirements-file`,
 `config-path`, or pass `extra-pip-install` when the caller's requirements don't
-already bring `flow-doctor[diagnosis,s3]`. `secrets: inherit` passes
-`ANTHROPIC_API_KEY` (define it once as an org-level Actions secret to avoid
-per-repo setup). The repo/org setting **"Allow GitHub Actions to create and
-approve pull requests"** must be enabled for the PR step to succeed.
+already bring `flow-doctor[diagnosis-openai,s3]` (or `flow-doctor[router]` for
+`provider: router`). `secrets: inherit` passes `OPENROUTER_API_KEY` (define it
+once as an org-level Actions secret to avoid per-repo setup) — only needed
+when `flow-doctor.yaml` uses `provider: openai_compat`; skip it entirely under
+`provider: router`, which resolves its own credential through krepis. The
+repo/org setting **"Allow GitHub Actions to create and approve pull
+requests"** must be enabled for the PR step to succeed.
 
 <details><summary>Self-contained alternative (no reusable workflow)</summary>
 
@@ -608,7 +612,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install "flow-doctor[diagnosis]"
+      - run: pip install "flow-doctor[diagnosis-openai]"
       - run: |
           python -m flow_doctor.fix.cli generate-fix \
             --issue-number ${{ github.event.issue.number }} \
@@ -616,7 +620,7 @@ jobs:
             --token $GITHUB_TOKEN
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 ```
 
 </details>

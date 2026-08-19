@@ -30,7 +30,11 @@ def test_all_defaults_point_at_the_constant():
     # through when a caller passes it explicitly, same as every real caller
     # (DiagnosisConfig.model, FixGenerator's own default) does.
     assert (
-        OpenAICompatProvider(api_key="x", model=DEFAULT_DIAGNOSIS_MODEL, base_url="http://x/v1").model
+        OpenAICompatProvider(
+            api_key="x",
+            model=DEFAULT_DIAGNOSIS_MODEL,
+            base_url="https://openrouter.ai/api/v1",  # reports its own billed cost
+        ).model
         == DEFAULT_DIAGNOSIS_MODEL
     )
     assert FixGenerator(api_key="x", provider="openai_compat").model == DEFAULT_DIAGNOSIS_MODEL

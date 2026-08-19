@@ -145,3 +145,104 @@ def test_fix_generator_base_url_default_is_none():
     from flow_doctor.fix.generator import FixGenerator
 
     assert FixGenerator(api_key="k", provider="openai_compat").base_url is None
+
+
+# ── No vendor default may creep back in (0.15.0) ─────────────────────────────
+#
+# `AnthropicProvider` was deleted in 0.15.0 (Brian ruling: flow-doctor must
+# not depend on the `anthropic` distribution or construct a direct-Anthropic
+# client anywhere). The specific defect that made this necessary:
+# `DiagnosisConfig.provider` used to default to `"anthropic"`, so every fleet
+# config that simply omitted `provider:` silently took a direct, unscanned
+# connection to one vendor with nothing in its own configuration saying so.
+# These guards are the sibling of `test_no_provider_endpoint_literal_in_package`
+# above — that one catches a hardcoded endpoint URL, these catch the vendor
+# SDK and the quiet default coming back.
+
+
+def test_anthropic_distribution_not_a_dependency_anywhere():
+    """No `pyproject.toml` dependency list — base or any extra — may name the
+    `anthropic` distribution. It was declared in three places at once
+    (`diagnosis`, `agent`, `all` extras) before 0.15.0; `krepis`'s own
+    `flow_doctor` extra floors `flow-doctor[diagnosis,s3]`, so the `diagnosis`
+    extra alone forced the Anthropic SDK onto every `krepis[flow_doctor]`
+    consumer transitively — including repos that had deliberately removed
+    direct LLM exposure (crucible-executor, 2026-05-25).
+    """
+    try:
+        import tomllib
+    except ImportError:  # Python < 3.11 (repo supports 3.9+); optional here.
+        tomllib = pytest.importorskip("tomli")
+
+    pyproject_path = pathlib.Path(__file__).resolve().parent.parent / "pyproject.toml"
+    data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+
+    def _names(specs):
+        # A PEP 508 requirement string: name, optional extras in [...], then
+        # a version specifier / other trailer. The distribution name is
+        # everything before the first non-name character.
+        for spec in specs:
+            name = re.match(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)", spec)
+            if name:
+                yield name.group(1).lower()
+
+    offenders = []
+    base_deps = data.get("project", {}).get("dependencies", [])
+    if "anthropic" in _names(base_deps):
+        offenders.append("project.dependencies")
+    for extra, specs in data.get("project", {}).get("optional-dependencies", {}).items():
+        if "anthropic" in _names(specs):
+            offenders.append(f"project.optional-dependencies.{extra}")
+
+    assert not offenders, (
+        "the 'anthropic' distribution is declared as a dependency in: "
+        + ", ".join(offenders)
+    )
+
+
+def test_no_anthropic_import_in_package():
+    """No packaged module may import the `anthropic` SDK. Comment lines are
+    skipped (history may be explained where relevant); anything the code can
+    actually reach is a failure."""
+    pkg = pathlib.Path(__file__).resolve().parent.parent / "flow_doctor"
+    offenders = []
+
+    import_re = re.compile(r"^\s*(import\s+anthropic\b|from\s+anthropic\b)")
+
+    for path in sorted(pkg.rglob("*.py")):
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            if import_re.match(stripped):
+                offenders.append(f"{path.relative_to(pkg.parent)}:{lineno}: {stripped}")
+
+    assert not offenders, (
+        "packaged code imports 'anthropic' — flow-doctor must not construct "
+        "a direct-Anthropic client anywhere:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_diagnosis_provider_has_no_default_value():
+    """`DiagnosisConfig.provider` must have no vendor default. It used to
+    default to `"anthropic"` — the actual defect: every config that omitted
+    `provider:` silently chose a vendor. `None` (not a vendor) is the only
+    legal default; an explicit choice or a loud ConfigError, never a
+    picked-for-you vendor.
+    """
+    field = DiagnosisConfig.model_fields["provider"]
+    assert field.default is None
+    assert DiagnosisConfig().provider is None
+
+
+def test_fix_generator_provider_parameter_has_no_default():
+    """`FixGenerator.__init__`'s `provider` parameter must be required — no
+    default value at all — mirroring `DiagnosisConfig.provider` above."""
+    import inspect
+
+    from flow_doctor.fix.generator import FixGenerator
+
+    sig = inspect.signature(FixGenerator.__init__)
+    assert sig.parameters["provider"].default is inspect.Parameter.empty

@@ -29,7 +29,7 @@ def _make_config(db_path, diagnosis_enabled=False, api_key=None):
             # deleted) — `diagnosis.enabled=True` now requires it explicitly,
             # so name it whenever diagnosis is actually on.
             provider="openai_compat" if diagnosis_enabled else None,
-            base_url="http://fake.internal/v1" if diagnosis_enabled else None,
+            base_url="https://openrouter.ai/api/v1" if diagnosis_enabled else None,
             api_key=api_key,
             confidence_calibration=0.85,
         ),
@@ -192,7 +192,7 @@ def test_report_cascade_skips_diagnosis():
         assert report_id is not None
 
 
-def test_diagnosis_rate_limiting():
+def test_diagnosis_rate_limiting(monkeypatch):
     """Diagnosis should be rate-limited."""
     with tempfile.NamedTemporaryFile(suffix=".db") as f:
         config = _make_config(f.name, diagnosis_enabled=True, api_key="test-key")
@@ -204,34 +204,22 @@ def test_diagnosis_rate_limiting():
             "confidence": 0.9,
         })
 
-        mock_block = MagicMock()
-        mock_block.type = "text"
-        mock_block.text = response_json
+        _install_fake_openai(
+            monkeypatch,
+            _mock_openai_response(response_json, prompt=1000, completion=200, cost=0.01),
+        )
 
-        mock_usage = MagicMock()
-        mock_usage.input_tokens = 1000
-        mock_usage.output_tokens = 200
+        fd = FlowDoctor(config)
 
-        mock_response = MagicMock()
-        mock_response.content = [mock_block]
-        mock_response.usage = mock_usage
+        # First report gets diagnosis
+        id1 = fd.report(ValueError("error 1"))
+        diag1 = fd._store.get_diagnosis_by_report(id1)
+        assert diag1 is not None
 
-        with patch("anthropic.Anthropic") as mock_anthropic_cls:
-            mock_client = MagicMock()
-            mock_client.messages.create.return_value = mock_response
-            mock_anthropic_cls.return_value = mock_client
-
-            fd = FlowDoctor(config)
-
-            # First report gets diagnosis
-            id1 = fd.report(ValueError("error 1"))
-            diag1 = fd._store.get_diagnosis_by_report(id1)
-            assert diag1 is not None
-
-            # Second report should be rate-limited (no diagnosis)
-            id2 = fd.report(TypeError("error 2"))
-            diag2 = fd._store.get_diagnosis_by_report(id2)
-            assert diag2 is None
+        # Second report should be rate-limited (no diagnosis)
+        id2 = fd.report(TypeError("error 2"))
+        diag2 = fd._store.get_diagnosis_by_report(id2)
+        assert diag2 is None
 
 
 def test_github_notifier_integration():

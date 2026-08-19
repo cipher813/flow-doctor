@@ -378,7 +378,7 @@ class TestEndToEnd:
                 "enabled": True,
                 "provider": "openai_compat",
                 "api_key": "fake-key",
-                "base_url": "http://fake.internal/v1",
+                "base_url": "https://openrouter.ai/api/v1",
             },
             remediation={
                 "enabled": True,
@@ -604,7 +604,11 @@ class TestEndToEnd:
             },
             diagnosis={
                 "enabled": True,
+                # `provider` has no default since 0.15.0 — see the other
+                # `_make_fd_with_diagnosis` helper above for the same note.
+                "provider": "openai_compat",
                 "api_key": "fake-key",
+                "base_url": "https://openrouter.ai/api/v1",
                 "max_daily_cost_usd": 0.002,
             },
             remediation={"enabled": False},
