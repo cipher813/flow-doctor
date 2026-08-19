@@ -35,17 +35,18 @@ Exception → Capture → Dedup → Diagnose (LLM, opt) → Notify (Telegram/...
 1. **Capture** — exception, traceback, logs, contextvars (`flow_name`, `stage`)
 2. **Dedup** — same error signature within cooldown window is suppressed (normalized to ignore reqIds, UUIDs, contract symbols, etc.)
 3. **Cascade** — if a declared upstream dependency also failed, tag it and skip diagnosis
-4. **Diagnose** *(opt)* — check the knowledge base (free), then call Claude if rate limit allows
+4. **Diagnose** *(opt)* — check the knowledge base (free), then call the configured LLM if rate limit allows
 5. **Notify** — Telegram / Slack / email / GitHub issue / S3 changelog (rate-limited with daily digest fallback)
 6. **Fix** *(opt)* — human adds `flow-doctor:fix` label on a filed issue, triggering automated fix PR generation
 
 ## Installation
 
 ```bash
-pip install flow-doctor                          # core only
-pip install "flow-doctor[diagnosis]"             # + LLM diagnosis (anthropic SDK)
-pip install "flow-doctor[diagnosis,remediation]" # + auto-remediation (boto3)
-pip install "flow-doctor[all]"                   # everything
+pip install flow-doctor                                # core only
+pip install "flow-doctor[diagnosis-openai]"             # + LLM diagnosis (any OpenAI-compatible endpoint)
+pip install "flow-doctor[diagnosis-openai,remediation]" # + auto-remediation (boto3)
+pip install "flow-doctor[router]"                       # + LLM diagnosis via a krepis router (no direct vendor key)
+pip install "flow-doctor[all]"                          # everything
 ```
 
 Python 3.9+. Core install is dependency-light (pyyaml, pydantic v2 + pydantic-settings, python-dotenv, typing_extensions); each extra pulls only what that capability needs.
@@ -285,29 +286,26 @@ store:
 
 diagnosis:
   enabled: true
-  model: claude-sonnet-4-6-20250514
-  api_key: ${ANTHROPIC_API_KEY}
+  provider: openai_compat
+  base_url: https://your-endpoint.example/v1   # required — no default
+  model: your-model
+  api_key: ${OPENROUTER_API_KEY}
+  price_in_per_1m: 0.50    # required unless the endpoint reports billed
+  price_out_per_1m: 1.50   # cost, so the daily cap stays honest
   timeout_seconds: 30
   max_daily_cost_usd: 1.00
 
-# flow-doctor ships NO default endpoint. It runs inside your error path, on
-# data you did not choose to send (tracebacks, log tails, source excerpts), so
-# it will not pick an inference vendor for you. Name a destination in exactly
-# one of three ways; if none resolves, diagnosis is disabled with the reason on
-# stderr rather than falling back to somebody's API.
+# flow-doctor ships NO default vendor and NO default endpoint. It runs inside
+# your error path, on data you did not choose to send (tracebacks, log tails,
+# source excerpts), so it will not pick an inference vendor for you.
+# `diagnosis.provider` has no default either — omitting it (with
+# `diagnosis.enabled: true`) is a loud ConfigError at config-load time, not a
+# silent fallback to any vendor. There are exactly two valid values:
 #
-# `diagnosis.provider` also accepts `openai_compat` (any OpenAI-compatible
-# chat-completions endpoint — your router, OpenAI, a self-hosted vLLM, an
-# inference vendor; `base_url` is REQUIRED, and drop `api_key` to use
-# `FLOW_DOCTOR_*` env fallbacks) and `router`:
-#
-# diagnosis:
-#   enabled: true
-#   provider: openai_compat
-#   base_url: https://your-endpoint.example/v1   # required — no default
-#   model: your-model
-#   price_in_per_1m: 0.50    # required unless the endpoint reports billed
-#   price_out_per_1m: 1.50   # cost, so the daily cap stays honest
+# `openai_compat` — any OpenAI-compatible chat-completions endpoint (your
+# router, OpenAI, OpenRouter, a self-hosted vLLM, any inference vendor).
+# `base_url` is REQUIRED — the example above. Drop `api_key` to use
+# `FLOW_DOCTOR_*` env fallbacks.
 #
 # BREAKING in 0.13.0: `base_url` previously defaulted to a hardcoded OpenRouter
 # API URL, so `openai_compat` without one sent your diagnosis context there
@@ -324,6 +322,14 @@ diagnosis:
 # key at all — for deployments that are themselves a krepis consumer. No
 # `api_key` is read or needed; the model, endpoint and credential are all
 # decided by the router at call time.
+#
+# BREAKING in 0.15.0: `provider: anthropic` (a native-SDK, direct-Anthropic
+# transport) was REMOVED, along with the `anthropic` package as a dependency
+# anywhere in flow-doctor. A config that still names `provider: anthropic`
+# now fails loudly at load time naming the two values above. If you were
+# relying on the old default (omitting `provider:` silently chose
+# `anthropic`), that silent choice was itself the defect this release closes
+# — see the 0.15.0 CHANGELOG entry.
 
 github:
   token: ${GITHUB_TOKEN}

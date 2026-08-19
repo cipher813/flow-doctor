@@ -23,12 +23,20 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e ".[dev,diagnosis]"
+          # `diagnosis` (the anthropic SDK extra) was removed in 0.15.0 —
+          # flow-doctor no longer depends on it anywhere. Install whichever
+          # transport `flow-doctor.yaml`'s `diagnosis.provider` names:
+          # `diagnosis-openai` for `openai_compat`, `router` for `router`.
+          pip install -e ".[dev,diagnosis-openai,router]"
 
       - name: Generate fix
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Set the credential matching flow-doctor.yaml's diagnosis.provider:
+          # OPENROUTER_API_KEY for provider=openai_compat (or set
+          # diagnosis.api_key directly), or nothing at all for
+          # provider=router (krepis resolves its own credential).
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           python -m flow_doctor.fix.cli generate-fix \
             --issue-number ${{ github.event.issue.number }} \

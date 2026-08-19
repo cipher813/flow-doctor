@@ -151,13 +151,24 @@ class RateLimitConfig(_ConfigModel):
 
 class DiagnosisConfig(_ConfigModel):
     enabled: bool = False
-    # "anthropic" (native SDK), "openai_compat" (any OpenAI-compatible
-    # chat-completions endpoint: OpenRouter open-weight models, OpenAI,
-    # self-hosted vLLM — set base_url + model accordingly), or "router"
-    # (resolve a krepis router capability class — requires the optional
-    # `krepis` dependency, `pip install flow-doctor[router]`; no api_key
-    # needed, see model_group).
-    provider: str = "anthropic"
+    # "openai_compat" (any OpenAI-compatible chat-completions endpoint:
+    # OpenRouter open-weight models, OpenAI, self-hosted vLLM — set base_url
+    # + model accordingly) or "router" (resolve a krepis router capability
+    # class — requires the optional `krepis` dependency, `pip install
+    # flow-doctor[router]`; no api_key needed, see model_group).
+    #
+    # There is deliberately NO default and NEVER an "anthropic" value again
+    # (0.15.0 — Brian ruling; flow-doctor must not depend on the `anthropic`
+    # distribution or construct a direct-Anthropic client anywhere). Until
+    # 0.15.0 this field defaulted to `"anthropic"`, so every fleet config
+    # that simply omitted `provider:` silently took a direct, unscanned
+    # connection to one specific vendor without a single line of its own
+    # configuration saying so. A missing choice is now a loud ConfigError
+    # (raised in `load_config` and `FlowDoctor._init_diagnosis`) naming the
+    # two valid values above, never a picked-for-you vendor. `None` here
+    # means "not yet chosen", not "chose the old default" — it is not itself
+    # a vendor default.
+    provider: Optional[str] = None
     model: str = DEFAULT_DIAGNOSIS_MODEL
     api_key: Optional[str] = None
     # provider: router only. One of the krepis router's capability classes
@@ -516,7 +527,14 @@ def load_config(
         diag_raw = _resolve_dict(diag_raw)
         diagnosis_config = DiagnosisConfig(
             enabled=diag_raw.get("enabled", False),
-            provider=diag_raw.get("provider", "anthropic"),
+            # No fallback literal (0.15.0 — see DiagnosisConfig.provider's
+            # docstring). The parser used to carry its own copy of the
+            # `"anthropic"` default, which is exactly how every fleet config
+            # that omitted `provider:` took the direct-Anthropic path
+            # without saying so — fixing the field's default alone would
+            # have left this, the path every file-configured deployment
+            # actually takes, still silently choosing a vendor.
+            provider=diag_raw.get("provider"),
             model=diag_raw.get("model", DEFAULT_DIAGNOSIS_MODEL),
             api_key=diag_raw.get("api_key"),
             model_group=diag_raw.get("model_group"),
@@ -540,6 +558,25 @@ def load_config(
         )
     else:
         diagnosis_config = DiagnosisConfig()
+
+    # Fail loud at config LOAD time (not just at first use in
+    # FlowDoctor._init_diagnosis, which only runs for configs built through
+    # this loader — a directly-constructed FlowDoctorConfig still gets that
+    # check too). An explicit choice, or a loud error; never a picked-for-you
+    # vendor default.
+    if diagnosis_config.enabled and not diagnosis_config.provider:
+        raise ConfigError(
+            "diagnosis.enabled=True requires diagnosis.provider to be set "
+            "explicitly — flow-doctor has no default LLM vendor. Valid "
+            "values: 'router' (resolve a krepis capability class via "
+            "diagnosis.model_group) or 'openai_compat' (any OpenAI-compatible "
+            "endpoint via diagnosis.base_url)."
+        )
+    if diagnosis_config.enabled and diagnosis_config.provider not in ("router", "openai_compat"):
+        raise ConfigError(
+            f"diagnosis.provider must be 'router' or 'openai_compat', got "
+            f"'{diagnosis_config.provider}'"
+        )
 
     # Parse github config
     gh_raw = raw.get("github", {})

@@ -144,4 +144,4 @@ def test_fix_generator_openai_compat_without_base_url_fails_closed():
 def test_fix_generator_base_url_default_is_none():
     from flow_doctor.fix.generator import FixGenerator
 
-    assert FixGenerator(api_key="k").base_url is None
+    assert FixGenerator(api_key="k", provider="openai_compat").base_url is None

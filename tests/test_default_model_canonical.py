@@ -12,7 +12,7 @@ from pathlib import Path
 
 from flow_doctor.core.constants import DEFAULT_DIAGNOSIS_MODEL
 from flow_doctor.core.config import DiagnosisConfig
-from flow_doctor.diagnosis.provider import AnthropicProvider
+from flow_doctor.diagnosis.provider import OpenAICompatProvider
 from flow_doctor.fix.generator import FixGenerator
 
 # The malformed id that broke the layer; must never reappear as a literal.
@@ -25,8 +25,15 @@ def test_canonical_default_is_valid_alias():
 
 def test_all_defaults_point_at_the_constant():
     assert DiagnosisConfig().model == DEFAULT_DIAGNOSIS_MODEL
-    assert AnthropicProvider(api_key="x").model == DEFAULT_DIAGNOSIS_MODEL
-    assert FixGenerator(api_key="x").model == DEFAULT_DIAGNOSIS_MODEL
+    # OpenAICompatProvider.model has no class-level default (it's REQUIRED,
+    # unlike the deleted AnthropicProvider) — assert the constant flows
+    # through when a caller passes it explicitly, same as every real caller
+    # (DiagnosisConfig.model, FixGenerator's own default) does.
+    assert (
+        OpenAICompatProvider(api_key="x", model=DEFAULT_DIAGNOSIS_MODEL, base_url="http://x/v1").model
+        == DEFAULT_DIAGNOSIS_MODEL
+    )
+    assert FixGenerator(api_key="x", provider="openai_compat").model == DEFAULT_DIAGNOSIS_MODEL
 
 
 def test_yaml_fallback_default_is_canonical():

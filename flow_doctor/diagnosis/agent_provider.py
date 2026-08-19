@@ -2,8 +2,16 @@
 
 Uses the Agent SDK's query() to spawn an agent with tool access (Read, Grep,
 Glob, Bash) that can investigate failures by reading source code, checking
-logs, and inspecting infrastructure state. Falls back to AnthropicProvider
-when the Agent SDK is not available.
+logs, and inspecting infrastructure state.
+
+``claude_agent_sdk`` is a harness (it drives the ``claude`` CLI over a
+subprocess/MCP boundary) rather than a direct Anthropic API client — its own
+declared dependencies are ``anyio``, ``jsonschema``, ``mcp``, ``sniffio`` and
+``typing_extensions`` (measured against its PyPI ``requires_dist``, 2026-08),
+with no transitive ``anthropic`` distribution. It is therefore unaffected by
+the 0.15.0 removal of flow-doctor's own direct-Anthropic transport
+(``AnthropicProvider``, deleted) — this provider never held one, and does not
+fall back to one; there is no fallback here.
 
 Requires: pip install claude-agent-sdk
 Best used on EC2 where full repo checkouts exist.

@@ -25,6 +25,11 @@ def _make_config(db_path, diagnosis_enabled=False, api_key=None):
         store=StoreConfig(type="sqlite", path=db_path),
         diagnosis=DiagnosisConfig(
             enabled=diagnosis_enabled,
+            # `provider` has no default since 0.15.0 (AnthropicProvider was
+            # deleted) — `diagnosis.enabled=True` now requires it explicitly,
+            # so name it whenever diagnosis is actually on.
+            provider="openai_compat" if diagnosis_enabled else None,
+            base_url="http://fake.internal/v1" if diagnosis_enabled else None,
             api_key=api_key,
             confidence_calibration=0.85,
         ),
@@ -34,6 +39,36 @@ def _make_config(db_path, diagnosis_enabled=False, api_key=None):
             max_alerts_per_day=5,
         ),
     )
+
+
+def _install_fake_openai(monkeypatch, resp):
+    """Inject a fake `openai` module (the SDK is an optional extra — tests
+    can't rely on it being installed). Returns the mock client. Mirrors the
+    helper in tests/test_diagnosis_provider.py."""
+    import sys
+    import types
+
+    client = MagicMock()
+    client.chat.completions.create.return_value = resp
+    fake = types.ModuleType("openai")
+    fake.OpenAI = lambda *a, **kw: client
+    monkeypatch.setitem(sys.modules, "openai", fake)
+    return client
+
+
+def _mock_openai_response(content_text, prompt=1000, completion=500, cost=None):
+    usage = MagicMock()
+    usage.prompt_tokens = prompt
+    usage.completion_tokens = completion
+    usage.cost = cost
+    message = MagicMock()
+    message.content = content_text
+    choice = MagicMock()
+    choice.message = message
+    response = MagicMock()
+    response.choices = [choice]
+    response.usage = usage
+    return response
 
 
 def test_report_without_diagnosis():
@@ -88,7 +123,7 @@ def test_report_with_knowledge_base_hit():
         assert diag.root_cause == "Known data issue"
 
 
-def test_report_with_llm_diagnosis():
+def test_report_with_llm_diagnosis(monkeypatch):
     """LLM diagnosis on KB miss."""
     with tempfile.NamedTemporaryFile(suffix=".db") as f:
         config = _make_config(f.name, diagnosis_enabled=True, api_key="test-key")
@@ -104,25 +139,13 @@ def test_report_with_llm_diagnosis():
             "reasoning": "Traceback points to parser",
         })
 
-        mock_block = MagicMock()
-        mock_block.type = "text"
-        mock_block.text = response_json
+        _install_fake_openai(
+            monkeypatch,
+            _mock_openai_response(response_json, prompt=5000, completion=500, cost=0.02),
+        )
 
-        mock_usage = MagicMock()
-        mock_usage.input_tokens = 5000
-        mock_usage.output_tokens = 500
-
-        mock_response = MagicMock()
-        mock_response.content = [mock_block]
-        mock_response.usage = mock_usage
-
-        with patch("anthropic.Anthropic") as mock_anthropic_cls:
-            mock_client = MagicMock()
-            mock_client.messages.create.return_value = mock_response
-            mock_anthropic_cls.return_value = mock_client
-
-            fd = FlowDoctor(config)
-            report_id = fd.report(RuntimeError("parser crashed"))
+        fd = FlowDoctor(config)
+        report_id = fd.report(RuntimeError("parser crashed"))
 
         assert report_id is not None
 

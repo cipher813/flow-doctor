@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flow-doctor"
-version = "0.14.0"
+version = "0.15.0"
 description = "Pipeline error handler: capture, deduplicate, diagnose, and auto-fix failures."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -21,7 +21,6 @@ keywords = [
     "diagnosis",
     "auto-fix",
     "llm",
-    "anthropic",
     "claude",
     "telegram",
     "slack",
@@ -54,13 +53,23 @@ dependencies = [
 
 [project.optional-dependencies]
 slack = ["requests>=2.28"]
-diagnosis = ["anthropic>=0.40"]
 # OpenAI-compatible diagnosis/fix transport (OpenRouter open-weight models,
-# OpenAI, self-hosted vLLM) — diagnosis.provider: openai_compat.
+# OpenAI, self-hosted vLLM) — diagnosis.provider: openai_compat. This is the
+# ONLY direct-vendor transport flow-doctor ships: provider-neutral (any
+# OpenAI-compatible base_url, operator-named — no default endpoint), so it
+# carries no lock-in to a specific vendor SDK. `anthropic` was removed
+# entirely in 0.15.0 (Brian ruling: flow-doctor must not depend on the
+# `anthropic` distribution or construct a direct-Anthropic client anywhere —
+# alpha-engine-config-I7460) rather than kept as a second vendor-specific
+# transport alongside this one.
 diagnosis-openai = ["openai>=1.40"]
 remediation = ["boto3>=1.26"]
 s3 = ["boto3>=1.26"]
-agent = ["claude-agent-sdk>=0.1", "anthropic>=0.40"]
+# claude-agent-sdk is a HARNESS (drives the `claude` CLI over a
+# subprocess/MCP boundary), not a direct Anthropic API client — its own
+# declared deps are anyio/jsonschema/mcp/sniffio/typing_extensions, with no
+# transitive `anthropic` (measured against its PyPI requires_dist, 2026-08).
+agent = ["claude-agent-sdk>=0.1"]
 # SFT capture for small-model distillation (config#1541). Emits each diagnosis
 # call as a canonical krepis SFT v3 record when the fleet capture switch is set.
 # krepis is MIT (no AGPL seam) — the same non-AGPL path morning-signal uses.
@@ -74,15 +83,14 @@ webpush = ["krepis[webpush]>=0.17.0"]
 # pulls in the `openai` package the router edge's OpenAI-compatible wire uses
 # (krepis.llm.LLMClient, TRANSPORT_OPENAI). krepis is MIT (no AGPL seam).
 router = ["krepis[openai]>=0.17.0"]
-all = ["requests>=2.28", "anthropic>=0.40", "boto3>=1.26", "krepis[webpush,openai]>=0.17.0"]
+all = ["requests>=2.28", "openai>=1.40", "boto3>=1.26", "krepis[webpush,openai]>=0.17.0"]
 dev = [
     "pytest>=7.0",
     "requests>=2.28",
-    "anthropic>=0.40",
     "coverage[toml]>=7.0",
 ]
 # SFT-capture tests run under `.[dev,sft]` (`krepis` present); they
-# `importorskip("krepis")` so the default `.[dev,diagnosis]` CI env — which
+# `importorskip("krepis")` so the default `.[dev]` CI env — which
 # deliberately excludes krepis so the local Telegram-transport tests exercise
 # the fallback path — skips them cleanly rather than erroring.
 dev-sft = ["krepis>=0.17.0"]

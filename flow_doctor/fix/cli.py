@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 
 from flow_doctor.core.config import AutoFixConfig, load_config
 from flow_doctor.core.models import FixAttempt
+from flow_doctor.core.router import RouterUnresolvable
 from flow_doctor.fix.generator import FixGenerator
 from flow_doctor.fix.pr_creator import PRCreator
 from flow_doctor.fix.replay_store import ReplayStore
@@ -270,20 +271,53 @@ def generate_fix(
     except Exception:
         pass
 
-    # Generate fix via LLM — same provider/base_url the diagnosis runs on.
+    # Generate fix via LLM — same provider/base_url/model_group the diagnosis
+    # runs on. `provider: anthropic` was REMOVED from `FixGenerator` in
+    # 0.15.0 (the fleet's Anthropic account carries a $0 budget,
+    # alpha-engine-config-I7460) — refuse it here with the replacement named,
+    # rather than letting `FixGenerator.__init__`'s ValueError surface as an
+    # uncaught crash instead of a GitHub comment.
     provider = config.diagnosis.provider
 
-    # `provider: router` is a diagnosis-side capability only: `RouterProvider`
-    # drives `krepis.llm.LLMClient`, which `FixGenerator` does not use, and the
-    # branch below would otherwise fall through to `else` and send an Anthropic
-    # key to a route nobody selected. Refuse instead — a deployment that
-    # deliberately holds no direct provider credential must not have one
-    # substituted for it here. Tracked: alpha-engine-config-I7014.
-    if provider == "router":
+    if not provider:
+        # `diagnosis.provider` has NO default (0.15.0) — flow-doctor has no
+        # vendor to fall back to. `load_config` already fails loud at load
+        # time when `diagnosis.enabled=True`, but auto-fix reads this same
+        # field independently of that flag (a fix-generation-only deployment
+        # can run with `diagnosis.enabled=False`), so it needs its own gate.
         msg = (
-            "Auto-fix does not support diagnosis.provider='router' yet — "
-            "FixGenerator has no krepis transport. Set auto_fix.enabled=false, "
-            "or configure a direct diagnosis provider for the fix path."
+            "diagnosis.provider is not set. flow-doctor has no default LLM "
+            "vendor. Set diagnosis.provider='router' with diagnosis.model_group "
+            "(one of: low, med, high, ultra), or diagnosis.provider="
+            "'openai_compat' with diagnosis.base_url."
+        )
+        _comment_failure(repo, issue_number, token, msg)
+        return (FixOutcome.FAILED, msg)
+
+    if provider == "anthropic":
+        msg = (
+            "diagnosis.provider='anthropic' is no longer supported for "
+            "auto-fix (removed in 0.15.0 — the direct-Anthropic transport "
+            "is dead weight against a $0 account budget). Set "
+            "diagnosis.provider='router' with diagnosis.model_group (one of: "
+            "low, med, high, ultra), or diagnosis.provider='openai_compat' "
+            "with diagnosis.base_url."
+        )
+        _comment_failure(repo, issue_number, token, msg)
+        return (FixOutcome.FAILED, msg)
+
+    if provider not in ("router", "openai_compat"):
+        msg = (
+            f"diagnosis.provider must be 'router' or 'openai_compat', got "
+            f"'{provider}'."
+        )
+        _comment_failure(repo, issue_number, token, msg)
+        return (FixOutcome.FAILED, msg)
+
+    if provider == "router" and not config.diagnosis.model_group:
+        msg = (
+            "diagnosis.provider='router' requires diagnosis.model_group "
+            "(one of: low, med, high, ultra) and it is not set."
         )
         _comment_failure(repo, issue_number, token, msg)
         return (FixOutcome.FAILED, msg)
@@ -297,35 +331,50 @@ def generate_fix(
         _comment_failure(repo, issue_number, token, msg)
         return (FixOutcome.FAILED, msg)
 
-    key_env = "OPENROUTER_API_KEY" if provider == "openai_compat" else "ANTHROPIC_API_KEY"
-    api_key = (
-        config.diagnosis.api_key
-        or os.environ.get(key_env)
-    )
-    if not api_key:
-        msg = f"No LLM API key configured (diagnosis.api_key or {key_env})"
+    model = af_config.model or config.diagnosis.model
+
+    if provider == "router":
+        # No api_key gate: krepis resolves the credential itself (env var,
+        # then the per-consumer SSM secret) — same reasoning as the
+        # diagnosis-side RouterProvider wiring in core/client.py.
+        print(f"[flow-doctor] Generating fix with router:{config.diagnosis.model_group}...")
+        generator = FixGenerator(
+            model=model,
+            provider="router",
+            model_group=config.diagnosis.model_group,
+        )
+    else:
+        api_key = config.diagnosis.api_key or os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            msg = "No LLM API key configured (diagnosis.api_key or OPENROUTER_API_KEY)"
+            _comment_failure(repo, issue_number, token, msg)
+            return (FixOutcome.FAILED, msg)
+
+        print(f"[flow-doctor] Generating fix with {provider}:{model}...")
+        generator = FixGenerator(
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            base_url=config.diagnosis.base_url,
+        )
+    try:
+        diff = generator.generate(
+            category=category,
+            root_cause=root_cause,
+            confidence=confidence,
+            remediation=remediation,
+            affected_files=affected_files,
+            file_contents=file_contents,
+            test_contents=test_contents,
+            prior_rejections=prior_rejections or None,
+        )
+    except RouterUnresolvable as e:
+        # Fail closed, but as a reported FAILED outcome (a GitHub comment)
+        # rather than an uncaught crash — same treatment every other gate in
+        # this function gets. Never falls back to a direct provider.
+        msg = f"Router group {config.diagnosis.model_group!r} could not be resolved: {e}"
         _comment_failure(repo, issue_number, token, msg)
         return (FixOutcome.FAILED, msg)
-
-    model = af_config.model or config.diagnosis.model
-    print(f"[flow-doctor] Generating fix with {provider}:{model}...")
-
-    generator = FixGenerator(
-        api_key=api_key,
-        model=model,
-        provider=provider,
-        base_url=config.diagnosis.base_url,
-    )
-    diff = generator.generate(
-        category=category,
-        root_cause=root_cause,
-        confidence=confidence,
-        remediation=remediation,
-        affected_files=affected_files,
-        file_contents=file_contents,
-        test_contents=test_contents,
-        prior_rejections=prior_rejections or None,
-    )
 
     if not diff:
         # The model deliberately declined (NO_FIX) — same spirit as the

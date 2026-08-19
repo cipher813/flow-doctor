@@ -58,7 +58,6 @@ _ENV_FALLBACKS: Dict[str, List[str]] = {
     "smtp_sender": ["FLOW_DOCTOR_SMTP_SENDER", "EMAIL_SENDER"],
     "smtp_recipients": ["FLOW_DOCTOR_SMTP_RECIPIENTS", "EMAIL_RECIPIENTS"],
     "slack_webhook": ["FLOW_DOCTOR_SLACK_WEBHOOK", "SLACK_WEBHOOK_URL"],
-    "anthropic_api_key": ["FLOW_DOCTOR_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
     "s3_bucket": ["FLOW_DOCTOR_S3_BUCKET", "CHANGELOG_BUCKET"],
     "telegram_bot_token": ["FLOW_DOCTOR_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"],
     "telegram_chat_id": ["FLOW_DOCTOR_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"],
@@ -649,11 +648,35 @@ class FlowDoctor:
             dependencies=config.dependencies,
         )
 
+        if not config.diagnosis.enabled:
+            return
+
+        # `diagnosis.provider` has NO default (0.15.0). It used to default to
+        # `"anthropic"`, which meant every fleet config that simply omitted
+        # `provider:` silently took the direct-Anthropic path — over an
+        # unscanned connection, with nothing in that config saying so. The
+        # $0 account-balance failure that surfaced it was incidental; the
+        # defect was the quiet default itself. There is no vendor to fall
+        # back to now: an unset provider is a loud ConfigError, not a guess.
+        if not config.diagnosis.provider:
+            raise ConfigError(
+                "diagnosis.enabled=True requires diagnosis.provider to be set "
+                "explicitly — flow-doctor has no default LLM vendor. Valid "
+                "values: 'router' (resolve a krepis capability class via "
+                "diagnosis.model_group) or 'openai_compat' (any "
+                "OpenAI-compatible endpoint via diagnosis.base_url)."
+            )
+        if config.diagnosis.provider not in ("router", "openai_compat"):
+            raise ConfigError(
+                f"diagnosis.provider must be 'router' or 'openai_compat', "
+                f"got '{config.diagnosis.provider}'"
+            )
+
         # "router" needs no api_key — krepis resolves the credential itself
         # (env var, then the per-consumer SSM secret) — so it is the one
-        # provider allowed to init without one; every other provider keeps
-        # the pre-existing api_key gate unchanged.
-        if config.diagnosis.enabled and config.diagnosis.provider == "router":
+        # provider allowed to init without one; "openai_compat" keeps the
+        # pre-existing api_key gate.
+        if config.diagnosis.provider == "router":
             try:
                 from flow_doctor.diagnosis.provider import RouterProvider
                 if not config.diagnosis.model_group:
@@ -673,65 +696,53 @@ class FlowDoctor:
                     "disabled. Install with: pip install flow-doctor[router]",
                     file=sys.stderr,
                 )
-        elif config.diagnosis.enabled and config.diagnosis.api_key:
-            if config.diagnosis.provider == "openai_compat":
-                if not config.diagnosis.base_url:
-                    # Fail closed. There is no default endpoint to fall into,
-                    # and picking one would mean sending this pipeline's
-                    # tracebacks to a third party the operator never named.
-                    # Disabled-with-a-reason rather than raised: this runs on
-                    # the capture path, which must not throw into a consumer
-                    # that is already handling a failure.
-                    print(
-                        "[flow-doctor] WARNING: diagnosis disabled — "
-                        "diagnosis.provider='openai_compat' requires "
-                        "diagnosis.base_url, and it is not set. Set it to the "
-                        "OpenAI-compatible endpoint you want, or use "
-                        "diagnosis.provider='router' with a model_group to "
-                        "resolve one through krepis. flow-doctor ships no "
-                        "default endpoint.",
-                        file=sys.stderr,
-                    )
-                    return
-                try:
-                    from flow_doctor.diagnosis.provider import OpenAICompatProvider
-                    self._diagnosis_provider = OpenAICompatProvider(
-                        api_key=config.diagnosis.api_key,
-                        model=config.diagnosis.model,
-                        base_url=config.diagnosis.base_url,
-                        confidence_calibration=config.diagnosis.confidence_calibration,
-                        timeout_seconds=config.diagnosis.timeout_seconds,
-                        price_in_per_1m=config.diagnosis.price_in_per_1m,
-                        price_out_per_1m=config.diagnosis.price_out_per_1m,
-                        sft_sink_path=config.diagnosis.sft_sink_path,
-                    )
-                except ImportError:
-                    print(
-                        "[flow-doctor] WARNING: openai package not installed, diagnosis disabled. "
-                        "Install with: pip install flow-doctor[diagnosis-openai]",
-                        file=sys.stderr,
-                    )
-            elif config.diagnosis.provider == "anthropic":
-                try:
-                    from flow_doctor.diagnosis.provider import AnthropicProvider
-                    self._diagnosis_provider = AnthropicProvider(
-                        api_key=config.diagnosis.api_key,
-                        model=config.diagnosis.model,
-                        confidence_calibration=config.diagnosis.confidence_calibration,
-                        timeout_seconds=config.diagnosis.timeout_seconds,
-                        sft_sink_path=config.diagnosis.sft_sink_path,
-                    )
-                except ImportError:
-                    print(
-                        "[flow-doctor] WARNING: anthropic package not installed, diagnosis disabled. "
-                        "Install with: pip install flow-doctor[diagnosis]",
-                        file=sys.stderr,
-                    )
-            else:
-                raise ConfigError(
-                    f"diagnosis.provider must be 'anthropic', 'openai_compat', or "
-                    f"'router', got '{config.diagnosis.provider}'"
-                )
+            return
+
+        # provider == "openai_compat"
+        if not config.diagnosis.api_key:
+            # Same fail-closed shape as the base_url gate below: a capture
+            # path must not throw into a consumer already handling a
+            # failure, but it must say so loudly enough to be found.
+            print(
+                "[flow-doctor] WARNING: diagnosis disabled — "
+                "diagnosis.provider='openai_compat' requires "
+                "diagnosis.api_key, and it is not set.",
+                file=sys.stderr,
+            )
+            return
+        if not config.diagnosis.base_url:
+            # Fail closed. There is no default endpoint to fall into,
+            # and picking one would mean sending this pipeline's
+            # tracebacks to a third party the operator never named.
+            print(
+                "[flow-doctor] WARNING: diagnosis disabled — "
+                "diagnosis.provider='openai_compat' requires "
+                "diagnosis.base_url, and it is not set. Set it to the "
+                "OpenAI-compatible endpoint you want, or use "
+                "diagnosis.provider='router' with a model_group to "
+                "resolve one through krepis. flow-doctor ships no "
+                "default endpoint.",
+                file=sys.stderr,
+            )
+            return
+        try:
+            from flow_doctor.diagnosis.provider import OpenAICompatProvider
+            self._diagnosis_provider = OpenAICompatProvider(
+                api_key=config.diagnosis.api_key,
+                model=config.diagnosis.model,
+                base_url=config.diagnosis.base_url,
+                confidence_calibration=config.diagnosis.confidence_calibration,
+                timeout_seconds=config.diagnosis.timeout_seconds,
+                price_in_per_1m=config.diagnosis.price_in_per_1m,
+                price_out_per_1m=config.diagnosis.price_out_per_1m,
+                sft_sink_path=config.diagnosis.sft_sink_path,
+            )
+        except ImportError:
+            print(
+                "[flow-doctor] WARNING: openai package not installed, diagnosis disabled. "
+                "Install with: pip install flow-doctor[diagnosis-openai]",
+                file=sys.stderr,
+            )
 
     def _init_remediation(self, config: FlowDoctorConfig) -> None:
         """Initialize Phase 3 remediation components."""

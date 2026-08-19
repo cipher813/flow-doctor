@@ -1,29 +1,47 @@
-"""Tests for fix generator with mocked LLM API."""
+"""Tests for fix generator with mocked LLM transports.
+
+``FixGenerator`` no longer accepts ``provider="anthropic"`` (removed 0.15.0
+— alpha-engine-config-I7460, see ``tests/test_fix_generator_provider.py`` for
+the removal/rejection tests and ``tests/test_fix_generator_router.py`` for
+the krepis-router path). These tests exercise the surviving
+``openai_compat`` transport, which is now the default.
+"""
 
 import sys
-from unittest.mock import MagicMock, patch
+import types
+from unittest.mock import MagicMock
 
 from flow_doctor.fix.generator import FixGenerator
 
 
-def _mock_response(text: str):
-    """Create a mock Anthropic response."""
-    block = MagicMock()
-    block.type = "text"
-    block.text = text
+def _mock_openai_response(text: str):
+    """Create a mock OpenAI chat-completions response."""
+    message = MagicMock()
+    message.content = text
+    choice = MagicMock()
+    choice.message = message
     resp = MagicMock()
-    resp.content = [block]
+    resp.choices = [choice]
     return resp
 
 
-def _patch_anthropic():
-    """Create a mock anthropic module and patch it into sys.modules."""
-    mock_anthropic = MagicMock()
-    return patch.dict(sys.modules, {"anthropic": mock_anthropic}), mock_anthropic
+def _patch_openai():
+    """Create a mock openai module and patch it into sys.modules."""
+    mock_openai = types.ModuleType("openai")
+    mock_openai.OpenAI = MagicMock()
+    return __import__("unittest.mock", fromlist=["patch"]).patch.dict(
+        sys.modules, {"openai": mock_openai}
+    ), mock_openai
+
+
+def _gen(**kw):
+    defaults = dict(api_key="test-key", provider="openai_compat", base_url="http://router.internal/v1")
+    defaults.update(kw)
+    return FixGenerator(**defaults)
 
 
 def test_generate_returns_diff():
-    gen = FixGenerator(api_key="test-key")
+    gen = _gen()
 
     diff_text = (
         "--- a/main.py\n"
@@ -34,10 +52,10 @@ def test_generate_returns_diff():
         "+    return 1\n"
     )
 
-    patcher, mock_anthropic = _patch_anthropic()
+    patcher, mock_openai = _patch_openai()
     mock_client = MagicMock()
-    mock_anthropic.Anthropic.return_value = mock_client
-    mock_client.messages.create.return_value = _mock_response(diff_text)
+    mock_openai.OpenAI.return_value = mock_client
+    mock_client.chat.completions.create.return_value = _mock_openai_response(diff_text)
 
     with patcher:
         result = gen.generate(
@@ -56,12 +74,12 @@ def test_generate_returns_diff():
 
 
 def test_generate_no_fix():
-    gen = FixGenerator(api_key="test-key")
+    gen = _gen()
 
-    patcher, mock_anthropic = _patch_anthropic()
+    patcher, mock_openai = _patch_openai()
     mock_client = MagicMock()
-    mock_anthropic.Anthropic.return_value = mock_client
-    mock_client.messages.create.return_value = _mock_response("NO_FIX")
+    mock_openai.OpenAI.return_value = mock_client
+    mock_client.chat.completions.create.return_value = _mock_openai_response("NO_FIX")
 
     with patcher:
         result = gen.generate(
@@ -78,7 +96,7 @@ def test_generate_no_fix():
 
 
 def test_generate_strips_markdown_fences():
-    gen = FixGenerator(api_key="test-key")
+    gen = _gen()
 
     fenced = (
         "```diff\n"
@@ -90,10 +108,10 @@ def test_generate_strips_markdown_fences():
         "```"
     )
 
-    patcher, mock_anthropic = _patch_anthropic()
+    patcher, mock_openai = _patch_openai()
     mock_client = MagicMock()
-    mock_anthropic.Anthropic.return_value = mock_client
-    mock_client.messages.create.return_value = _mock_response(fenced)
+    mock_openai.OpenAI.return_value = mock_client
+    mock_client.chat.completions.create.return_value = _mock_openai_response(fenced)
 
     with patcher:
         result = gen.generate(
@@ -112,12 +130,12 @@ def test_generate_strips_markdown_fences():
 
 
 def test_generate_with_prior_rejections():
-    gen = FixGenerator(api_key="test-key")
+    gen = _gen()
 
-    patcher, mock_anthropic = _patch_anthropic()
+    patcher, mock_openai = _patch_openai()
     mock_client = MagicMock()
-    mock_anthropic.Anthropic.return_value = mock_client
-    mock_client.messages.create.return_value = _mock_response("NO_FIX")
+    mock_openai.OpenAI.return_value = mock_client
+    mock_client.chat.completions.create.return_value = _mock_openai_response("NO_FIX")
 
     with patcher:
         gen.generate(
@@ -132,8 +150,8 @@ def test_generate_with_prior_rejections():
         )
 
         # Verify rejection context was included in the prompt
-        call_args = mock_client.messages.create.call_args
-        user_msg = call_args[1]["messages"][0]["content"]
+        call_args = mock_client.chat.completions.create.call_args
+        user_msg = call_args[1]["messages"][1]["content"]
         assert "Prior Rejected Fix Attempts" in user_msg
         assert "assertion error" in user_msg
 

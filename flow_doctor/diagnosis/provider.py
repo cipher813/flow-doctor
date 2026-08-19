@@ -1,4 +1,16 @@
-"""Diagnosis providers: ABC + Anthropic and OpenAI-compatible implementations."""
+"""Diagnosis providers: ABC + OpenAI-compatible and krepis-router implementations.
+
+No provider here holds a vendor-specific direct client. ``AnthropicProvider``
+was deleted in 0.15.0 (Brian ruling: flow-doctor must not depend on the
+``anthropic`` distribution or construct a direct-Anthropic client anywhere —
+the fleet's Anthropic account carries a $0 budget, alpha-engine-config-I7460,
+and every deployment is now a krepis consumer). The two surviving transports
+are provider-neutral: :class:`OpenAICompatProvider` speaks OpenAI-compatible
+chat completions to an operator-named ``base_url`` (the path a self-hosted or
+external PyPI user takes — no vendor SDK, no default endpoint), and
+:class:`RouterProvider` resolves a krepis capability class instead of
+addressing any vendor directly.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +22,7 @@ from typing import Optional
 
 from flow_doctor.core.constants import DEFAULT_DIAGNOSIS_MODEL
 from flow_doctor.core.models import Diagnosis
+from flow_doctor.core.router import RouterUnresolvable, resolve_router_edge
 from flow_doctor.diagnosis.context import ContextAssembler, DiagnosisContext
 
 # SFT capture (small-model distillation corpus, config#1541). The diagnosis
@@ -107,136 +120,47 @@ def _capture_sft_record(
 # Valid categories for classification
 _VALID_CATEGORIES = {"TRANSIENT", "DATA", "CODE", "CONFIG", "EXTERNAL", "INFRA"}
 
-# Anthropic per-1M-token USD rates, keyed by model-name prefix (first match
-# wins). Fixes the pre-2026-07 bug where EVERY model was priced at Sonnet
-# rates ($3/$15) — the diagnosis cost feeds the max_daily_cost_usd cap in
-# core/client.py, so a Haiku deployment hit its cap 3x early and an Opus one
-# 1.7x late.
-_ANTHROPIC_PRICES_PER_1M = (
-    ("claude-opus", (5.0, 25.0)),
-    ("claude-sonnet", (3.0, 15.0)),
-    ("claude-haiku", (1.0, 5.0)),
-)
-_FALLBACK_PRICES_PER_1M = (5.0, 25.0)  # unknown model: price HIGH so the daily cap errs safe
 
+def _parse_llm_json_response(text: str) -> dict:
+    """Extract and parse JSON from LLM response text.
 
-def _anthropic_prices(model: str) -> "tuple[float, float]":
-    for prefix, prices in _ANTHROPIC_PRICES_PER_1M:
-        if model.startswith(prefix):
-            return prices
-    print(
-        f"[flow-doctor] WARNING: no price entry for model '{model}'; "
-        f"pricing at Opus rates so the daily cost cap errs conservative",
-        file=sys.stderr,
-    )
-    return _FALLBACK_PRICES_PER_1M
+    Shared across every diagnosis transport (``OpenAICompatProvider``,
+    ``RouterProvider``) — all speak the same JSON diagnosis contract; only
+    the transport differs. Lived as ``AnthropicProvider._parse_json`` until
+    0.15.0, when the direct-Anthropic transport was removed entirely
+    (Brian ruling: flow-doctor must not depend on the ``anthropic``
+    distribution or construct a direct-Anthropic client anywhere) and this
+    parser — genuinely provider-agnostic — was lifted to module level rather
+    than left hanging off the deleted class.
+    """
+    # Try direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
 
-
-class AnthropicProvider(DiagnosisProvider):
-    """Diagnosis provider using Anthropic Claude API."""
-
-    def __init__(
-        self,
-        api_key: str,
-        model: str = DEFAULT_DIAGNOSIS_MODEL,
-        confidence_calibration: float = 0.85,
-        timeout_seconds: int = 30,
-        sft_sink_path: Optional[str] = None,
-    ):
-        self.api_key = api_key
-        self.model = model
-        self.confidence_calibration = confidence_calibration
-        self.timeout_seconds = timeout_seconds
-        self.sft_sink_path = sft_sink_path
-
-    def diagnose(self, context: DiagnosisContext, assembler: ContextAssembler) -> Diagnosis:
-        """Call Claude API and parse the structured diagnosis response."""
-        import anthropic
-
-        client = anthropic.Anthropic(
-            api_key=self.api_key,
-            timeout=self.timeout_seconds,
-        )
-
-        user_prompt = assembler.build_prompt(context)
-
-        request_kwargs = dict(
-            model=self.model,
-            max_tokens=2048,
-            system=assembler.system_prompt,
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-        response = client.messages.create(**request_kwargs)
-
-        # Extract text content
-        text = ""
-        for block in response.content:
-            if block.type == "text":
-                text += block.text
-
-        # Parse JSON from response
-        parsed = self._parse_json(text)
-
-        # Cost from the CONFIGURED model's rates — this figure feeds the
-        # max_daily_cost_usd cap, so it must track the actual model.
-        input_tokens = response.usage.input_tokens
-        output_tokens = response.usage.output_tokens
-        total_tokens = input_tokens + output_tokens
-        price_in, price_out = _anthropic_prices(self.model)
-        cost = (input_tokens * price_in / 1_000_000) + (output_tokens * price_out / 1_000_000)
-
-        _capture_sft_record(
-            sink_path=self.sft_sink_path,
-            raw_request=request_kwargs,
-            raw_response=response,
-            text=text,
-            model=self.model,
-            provider="anthropic",
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cost_usd=cost,
-            meta={"provider": "anthropic", "flow_name": context.flow_name},
-        )
-
-        return _build_diagnosis(
-            parsed, text, context,
-            model=self.model,
-            tokens_used=total_tokens,
-            cost_usd=cost,
-            confidence_calibration=self.confidence_calibration,
-        )
-
-    @staticmethod
-    def _parse_json(text: str) -> dict:
-        """Extract and parse JSON from LLM response text."""
-        # Try direct parse first
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-
-        # Try to find JSON block in markdown code fence
-        for marker in ("```json", "```"):
-            if marker in text:
-                start = text.index(marker) + len(marker)
-                end = text.index("```", start) if "```" in text[start:] else len(text)
-                try:
-                    return json.loads(text[start:end].strip())
-                except json.JSONDecodeError:
-                    pass
-
-        # Try to find JSON object boundaries
-        brace_start = text.find("{")
-        brace_end = text.rfind("}")
-        if brace_start >= 0 and brace_end > brace_start:
+    # Try to find JSON block in markdown code fence
+    for marker in ("```json", "```"):
+        if marker in text:
+            start = text.index(marker) + len(marker)
+            end = text.index("```", start) if "```" in text[start:] else len(text)
             try:
-                return json.loads(text[brace_start:brace_end + 1])
+                return json.loads(text[start:end].strip())
             except json.JSONDecodeError:
                 pass
 
-        # Fallback: return minimal dict
-        print(f"[flow-doctor] WARNING: Could not parse LLM response as JSON", file=sys.stderr)
-        return {"root_cause": text[:500], "category": "CODE", "confidence": 0.3}
+    # Try to find JSON object boundaries
+    brace_start = text.find("{")
+    brace_end = text.rfind("}")
+    if brace_start >= 0 and brace_end > brace_start:
+        try:
+            return json.loads(text[brace_start:brace_end + 1])
+        except json.JSONDecodeError:
+            pass
+
+    # Fallback: return minimal dict
+    print(f"[flow-doctor] WARNING: Could not parse LLM response as JSON", file=sys.stderr)
+    return {"root_cause": text[:500], "category": "CODE", "confidence": 0.3}
 
 
 def _build_diagnosis(
@@ -321,7 +245,7 @@ def _call_openai_compat_chat(
     response = client.chat.completions.create(**request_kwargs)
 
     text = (response.choices[0].message.content or "").strip()
-    parsed = AnthropicProvider._parse_json(text)
+    parsed = _parse_llm_json_response(text)
 
     usage = getattr(response, "usage", None)
     input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
@@ -336,8 +260,9 @@ class OpenAICompatProvider(DiagnosisProvider):
     """Diagnosis provider for any OpenAI-compatible chat-completions endpoint
     (OpenRouter for open-weight models, OpenAI itself, self-hosted vLLM).
 
-    Same JSON diagnosis contract as :class:`AnthropicProvider` — the system
-    prompt and response parsing are shared; only the transport differs.
+    Same JSON diagnosis contract as :class:`RouterProvider` — the system
+    prompt and response parsing (``_parse_llm_json_response``) are shared;
+    only the transport differs.
 
     Cost accounting (feeds the ``max_daily_cost_usd`` cap, so it must never
     silently under-count): OpenRouter reports the actually-billed USD cost in
@@ -438,28 +363,13 @@ class OpenAICompatProvider(DiagnosisProvider):
         )
 
 
-class RouterUnresolvable(RuntimeError):
-    """The configured ``model_group`` could not be resolved to a callable
-    endpoint through the krepis router.
-
-    A distinct type (mirrors ``morning_signal.claude.RouterGroupUnresolvable``
-    and ``model-router-policy`` R20) so callers never mistake "the router
-    could not be reached" for "the router was reached and declined" — this
-    always means the diagnosis call did not happen at all.
-    """
-
-
-#: Routes a diagnosis call may be served on — the COMPELLED PATHS, per
-#: `model-router-policy.md` §5 and mirroring
-#: `morning_signal.claude._COMPELLED_ROUTES`. `litellm_proxy` is the
-#: authenticated router edge (the normal case). `egress_proxy` is the
-#: registry-derived direct route a consumer degrades to when the edge's own
-#: health probe fails — still DLP-scanned, still a route the registry
-#: declared, so R26 holds. Anything else (a bare `openrouter`/`anthropic`
-#: direct route chosen by krepis's own fallback) is refused:
-#: alpha-engine-config-I6367 forbids direct-OpenRouter linkage, and the
-#: 2026-07-17 ruling sets the direct-Anthropic API budget to $0.
-_COMPELLED_ROUTES = frozenset({"litellm_proxy", "egress_proxy"})
+# ``RouterUnresolvable`` and the resolution logic below moved to
+# ``flow_doctor.core.router`` in 0.15.0 (imported above) so
+# ``flow_doctor.fix.generator.FixGenerator``'s own router path
+# (alpha-engine-config-I7014) could share them rather than reimplementing the
+# compelled-route decision a second time. ``RouterUnresolvable`` is still
+# importable from this module — existing imports of
+# ``flow_doctor.diagnosis.provider.RouterUnresolvable`` keep working.
 
 
 class RouterProvider(DiagnosisProvider):
@@ -470,16 +380,17 @@ class RouterProvider(DiagnosisProvider):
     Optional — requires the ``krepis`` package (``pip install
     flow-doctor[router]``), the same optional-dependency shape as the SFT
     capture path above. flow-doctor is a self-hostable OSS tool: a self-hoster
-    with their own Anthropic/OpenRouter key keeps using ``AnthropicProvider``/
-    ``OpenAICompatProvider`` exactly as before. ``RouterProvider`` exists for
-    deployments that are themselves a krepis consumer (Nous Ergon's own
-    flow-doctor installs) and must not hold a direct provider key at all —
-    `model-router-policy.md` layer 5: a consumer applies the router's
-    resolution contract verbatim and holds no routing table of its own.
+    or external PyPI user with their own OpenAI-compatible endpoint keeps
+    using ``OpenAICompatProvider`` exactly as before — no krepis required.
+    ``RouterProvider`` exists for deployments that are themselves a krepis
+    consumer (Nous Ergon's own flow-doctor installs) and must not hold a
+    direct provider key at all — `model-router-policy.md` layer 5: a
+    consumer applies the router's resolution contract verbatim and holds no
+    routing table of its own.
 
     Fails closed (R20): any resolution failure — krepis missing, the group
     unresolvable from this execution context, or resolution landing on
-    anything outside :data:`_COMPELLED_ROUTES` — raises
+    anything outside :data:`flow_doctor.core.router.COMPELLED_ROUTES` — raises
     :class:`RouterUnresolvable` rather than falling back to a direct
     provider or an ambient key. There is no fallback chain here the way
     ``morning_signal`` has one; a diagnosis call skipped this cycle is a
@@ -499,60 +410,15 @@ class RouterProvider(DiagnosisProvider):
         self.sft_sink_path = sft_sink_path
 
     def _resolve(self):
-        """Resolve ``self.model_group`` to a callable ``(base_url, api_key,
-        model, route)`` via krepis. Raises :class:`RouterUnresolvable` on any
-        failure — never returns a partial or guessed result.
+        """Resolve ``self.model_group`` to a callable edge spec via krepis.
+
+        Thin wrapper over the shared :func:`flow_doctor.core.router
+        .resolve_router_edge` (lifted out in 0.15.0 so this decision is made
+        in one place — see the module-level note above). Raises
+        :class:`RouterUnresolvable` on any failure — never returns a partial
+        or guessed result.
         """
-        try:
-            from krepis.router import resolve_group_spec
-        except ImportError as exc:
-            raise RouterUnresolvable(
-                f"krepis is not installed, so router group {self.model_group!r} "
-                f"cannot be resolved. Install with: pip install flow-doctor[router]"
-            ) from exc
-
-        # Declared, never inferred (model-router-policy R29). None hands the
-        # decision to krepis's own documented default rather than guessing
-        # here from a hostname or metadata lookup.
-        exec_context = os.environ.get("KREPIS_EXEC_CONTEXT") or None
-        try:
-            edge_spec, route = resolve_group_spec(
-                self.model_group,
-                exec_context=exec_context,
-                # The router edge speaks OpenAI-compatible chat completions
-                # (see _call_openai_compat_chat); asking for the anthropic
-                # wire would hand back a URL this transport cannot speak.
-                wire="openai",
-                max_tokens=2048,
-            )
-        except Exception as exc:
-            raise RouterUnresolvable(
-                f"router group {self.model_group!r} did not resolve "
-                f"(exec_context={exec_context!r}): {exc}"
-            ) from exc
-
-        resolved_route = route.get("route")
-        if resolved_route not in _COMPELLED_ROUTES:
-            raise RouterUnresolvable(
-                f"router group {self.model_group!r} resolved to route "
-                f"{resolved_route!r} (provider={edge_spec.provider!r}), which "
-                f"is not a compelled path — refusing to call a direct "
-                f"provider chosen by fallback (alpha-engine-config-I6367). "
-                f"Compelled routes: {sorted(_COMPELLED_ROUTES)}"
-            )
-
-        if resolved_route != "litellm_proxy":
-            print(
-                f"[flow-doctor] DEGRADED: router group {self.model_group!r} "
-                f"resolved to route {resolved_route!r} (provider="
-                f"{edge_spec.provider!r} model={edge_spec.model!r}) rather "
-                f"than the authenticated edge — the edge's health probe did "
-                f"not pass. This is the registry-derived degraded route "
-                f"(model-router-policy §5), still the compelled path.",
-                file=sys.stderr,
-            )
-
-        return edge_spec
+        return resolve_router_edge(self.model_group, max_tokens=2048, log_prefix="flow-doctor")
 
     def diagnose(self, context: DiagnosisContext, assembler: ContextAssembler) -> Diagnosis:
         """Resolve the router group, then call the resolved endpoint.
@@ -584,7 +450,7 @@ class RouterProvider(DiagnosisProvider):
         )
 
         text = result.text
-        parsed = AnthropicProvider._parse_json(text)
+        parsed = _parse_llm_json_response(text)
 
         from krepis.cost import record_llm_call
 
