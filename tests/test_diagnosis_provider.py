@@ -1,11 +1,22 @@
-"""Tests for the diagnosis provider (with mocked Anthropic API)."""
+"""Tests for the diagnosis providers (with mocked LLM transports).
+
+``AnthropicProvider`` was DELETED in 0.15.0 — Brian ruling: flow-doctor must
+not depend on the ``anthropic`` distribution or construct a direct-Anthropic
+client anywhere (the fleet's Anthropic account carries a $0 budget,
+alpha-engine-config-I7460, and every deployment is now a krepis consumer).
+The surviving diagnosis transports are ``OpenAICompatProvider`` (any
+OpenAI-compatible endpoint — the provider-neutral path external/self-hosted
+users take) and ``RouterProvider`` (krepis capability class — see
+``tests/test_router_provider.py``). The JSON-extraction helper that used to
+live on ``AnthropicProvider._parse_json`` is now the module-level
+``_parse_llm_json_response``, shared by both surviving transports.
+"""
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-from flow_doctor.core.models import Diagnosis
 from flow_doctor.diagnosis.context import ContextAssembler, DiagnosisContext
-from flow_doctor.diagnosis.provider import AnthropicProvider
+from flow_doctor.diagnosis.provider import _parse_llm_json_response
 
 
 def _make_context(**kwargs):
@@ -19,186 +30,27 @@ def _make_context(**kwargs):
     return DiagnosisContext(**defaults)
 
 
-def _mock_response(content_text, input_tokens=1000, output_tokens=500):
-    """Create a mock Anthropic API response."""
-    block = MagicMock()
-    block.type = "text"
-    block.text = content_text
-
-    usage = MagicMock()
-    usage.input_tokens = input_tokens
-    usage.output_tokens = output_tokens
-
-    response = MagicMock()
-    response.content = [block]
-    response.usage = usage
-    return response
-
-
-def test_diagnose_parses_json():
-    provider = AnthropicProvider(api_key="test-key", confidence_calibration=1.0)
-    ctx = _make_context()
-    assembler = ContextAssembler()
-
-    response_json = json.dumps({
-        "category": "CODE",
-        "root_cause": "Invalid type conversion in parser",
-        "affected_files": ["parser.py:42"],
-        "confidence": 0.90,
-        "remediation": "Fix the type conversion",
-        "auto_fixable": True,
-        "alternative_hypotheses": ["Could be input data issue"],
-        "reasoning": "The traceback points to a ValueError in the parser",
-    })
-
-    mock_resp = _mock_response(response_json)
-
-    with patch("anthropic.Anthropic") as mock_cls:
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_resp
-        mock_cls.return_value = mock_client
-
-        result = provider.diagnose(ctx, assembler)
-
-    assert isinstance(result, Diagnosis)
-    assert result.category == "CODE"
-    assert result.root_cause == "Invalid type conversion in parser"
-    assert result.confidence == 0.90
-    assert result.affected_files == ["parser.py:42"]
-    assert result.remediation == "Fix the type conversion"
-    assert result.auto_fixable is True
-    assert result.alternative_hypotheses == ["Could be input data issue"]
-    assert result.source == "llm"
-    assert result.tokens_used == 1500
-    assert result.cost_usd is not None
-
-
-def test_confidence_calibration():
-    provider = AnthropicProvider(api_key="test-key", confidence_calibration=0.85)
-    ctx = _make_context()
-    assembler = ContextAssembler()
-
-    response_json = json.dumps({
-        "category": "DATA",
-        "root_cause": "Missing input file",
-        "confidence": 1.0,
-    })
-
-    mock_resp = _mock_response(response_json)
-
-    with patch("anthropic.Anthropic") as mock_cls:
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_resp
-        mock_cls.return_value = mock_client
-
-        result = provider.diagnose(ctx, assembler)
-
-    assert result.confidence == 0.85  # 1.0 * 0.85
+# --- _parse_llm_json_response (shared JSON-extraction helper) ──────────────
 
 
 def test_parse_json_from_code_fence():
     data = {"category": "TRANSIENT", "root_cause": "timeout", "confidence": 0.7}
     text = f"Here's my analysis:\n```json\n{json.dumps(data)}\n```"
-    result = AnthropicProvider._parse_json(text)
+    result = _parse_llm_json_response(text)
     assert result["category"] == "TRANSIENT"
 
 
 def test_parse_json_from_braces():
     data = {"category": "INFRA", "root_cause": "OOM", "confidence": 0.8}
     text = f"The diagnosis is: {json.dumps(data)} and that's it."
-    result = AnthropicProvider._parse_json(text)
+    result = _parse_llm_json_response(text)
     assert result["category"] == "INFRA"
 
 
 def test_parse_json_fallback():
-    result = AnthropicProvider._parse_json("This is not JSON at all")
+    result = _parse_llm_json_response("This is not JSON at all")
     assert result["category"] == "CODE"
     assert result["confidence"] == 0.3
-
-
-def test_invalid_category_normalized():
-    provider = AnthropicProvider(api_key="test-key", confidence_calibration=1.0)
-    ctx = _make_context()
-    assembler = ContextAssembler()
-
-    response_json = json.dumps({
-        "category": "UNKNOWN_CATEGORY",
-        "root_cause": "something",
-        "confidence": 0.5,
-    })
-
-    mock_resp = _mock_response(response_json)
-
-    with patch("anthropic.Anthropic") as mock_cls:
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_resp
-        mock_cls.return_value = mock_client
-
-        result = provider.diagnose(ctx, assembler)
-
-    assert result.category == "CODE"  # Falls back to CODE
-
-
-def test_cost_calculation():
-    provider = AnthropicProvider(api_key="test-key", confidence_calibration=1.0)
-    ctx = _make_context()
-    assembler = ContextAssembler()
-
-    response_json = json.dumps({
-        "category": "CODE",
-        "root_cause": "bug",
-        "confidence": 0.9,
-    })
-
-    # 10K input, 1K output
-    mock_resp = _mock_response(response_json, input_tokens=10000, output_tokens=1000)
-
-    with patch("anthropic.Anthropic") as mock_cls:
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_resp
-        mock_cls.return_value = mock_client
-
-        result = provider.diagnose(ctx, assembler)
-
-    # $3/M input + $15/M output = 10000*3/1M + 1000*15/1M = 0.03 + 0.015 = 0.045
-    assert abs(result.cost_usd - 0.045) < 0.001
-    assert result.tokens_used == 11000
-
-
-# --- per-model Anthropic pricing (bug fix: everything was priced at Sonnet) ---
-
-
-def _diagnose_with_model(model, input_tokens=1_000_000, output_tokens=0):
-    provider = AnthropicProvider(api_key="k", model=model, confidence_calibration=1.0)
-    resp = _mock_response(json.dumps({"category": "CODE", "root_cause": "x",
-                                      "confidence": 0.5}),
-                          input_tokens=input_tokens, output_tokens=output_tokens)
-    with patch("anthropic.Anthropic") as mock_cls:
-        client = MagicMock()
-        client.messages.create.return_value = resp
-        mock_cls.return_value = client
-        return provider.diagnose(_make_context(), ContextAssembler())
-
-
-def test_haiku_priced_at_haiku_rates_not_sonnet():
-    d = _diagnose_with_model("claude-haiku-4-5")
-    assert d.cost_usd == 1.0  # 1M input @ $1/M — the old code charged $3
-
-
-def test_sonnet_priced_at_sonnet_rates():
-    d = _diagnose_with_model("claude-sonnet-4-6")
-    assert d.cost_usd == 3.0
-
-
-def test_opus_priced_at_opus_rates():
-    d = _diagnose_with_model("claude-opus-4-7")
-    assert d.cost_usd == 5.0
-
-
-def test_unknown_model_priced_conservative(capsys):
-    d = _diagnose_with_model("claude-future-9")
-    assert d.cost_usd == 5.0  # Opus fallback: the daily cap errs safe
-    assert "no price entry" in capsys.readouterr().err
 
 
 # --- OpenAICompatProvider ---
@@ -308,26 +160,36 @@ def test_openai_compat_fenced_json_parses(monkeypatch):
     assert d.root_cause == "bad flag"
 
 
+def test_invalid_category_normalized(monkeypatch):
+    provider = _openai_provider()
+    resp = _mock_openai_response(
+        json.dumps({"category": "UNKNOWN_CATEGORY", "root_cause": "something",
+                    "confidence": 0.5}),
+        cost=0.0001,
+    )
+    _install_fake_openai(monkeypatch, resp)
+    d = provider.diagnose(_make_context(), ContextAssembler())
+    assert d.category == "CODE"  # Falls back to CODE
+
+
 # ── SFT capture (config#1541) ────────────────────────────────────────────────
 # The diagnosis task is the third SFT producer surface (Vires coach +
 # morning-signal are already wired). Capture is gated on the fleet env switch
-# and is pure telemetry — it must never alter or break a diagnosis.
+# and is pure telemetry — it must never alter or break a diagnosis. Exercised
+# here over OpenAICompatProvider (AnthropicProvider, the original SFT
+# call-site, was deleted in 0.15.0).
 
 _CAPTURE_ENV = "LLM_SFT_CAPTURE_ENABLED"
 
 
-def _run_anthropic_diagnose(sink_path):
-    provider = AnthropicProvider(
-        api_key="test-key", confidence_calibration=1.0, sft_sink_path=str(sink_path)
+def _run_openai_compat_diagnose(monkeypatch, sink_path):
+    provider = _openai_provider(sft_sink_path=str(sink_path))
+    resp = _mock_openai_response(
+        json.dumps({"category": "CODE", "root_cause": "boom", "confidence": 0.9}),
+        cost=0.0002,
     )
-    mock_resp = _mock_response(
-        json.dumps({"category": "CODE", "root_cause": "boom", "confidence": 0.9})
-    )
-    with patch("anthropic.Anthropic") as mock_cls:
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_resp
-        mock_cls.return_value = mock_client
-        return provider.diagnose(_make_context(), ContextAssembler())
+    _install_fake_openai(monkeypatch, resp)
+    return provider.diagnose(_make_context(), ContextAssembler())
 
 
 def test_sft_capture_writes_record_when_enabled(tmp_path, monkeypatch):
@@ -337,7 +199,7 @@ def test_sft_capture_writes_record_when_enabled(tmp_path, monkeypatch):
     monkeypatch.setenv(_CAPTURE_ENV, "1")
     sink = tmp_path / "_sft_raw" / "flow_doctor_diagnosis.sft.jsonl"
 
-    diagnosis = _run_anthropic_diagnose(sink)
+    diagnosis = _run_openai_compat_diagnose(monkeypatch, sink)
 
     # Diagnosis still returned unchanged.
     assert diagnosis.category == "CODE"
@@ -361,7 +223,7 @@ def test_sft_capture_noop_when_disabled(tmp_path, monkeypatch):
     monkeypatch.delenv("ALPHA_ENGINE_DECISION_CAPTURE_ENABLED", raising=False)
     sink = tmp_path / "_sft_raw" / "flow_doctor_diagnosis.sft.jsonl"
 
-    diagnosis = _run_anthropic_diagnose(sink)
+    diagnosis = _run_openai_compat_diagnose(monkeypatch, sink)
 
     assert diagnosis.category == "CODE"
     assert not sink.exists()  # capture is off → nothing written
@@ -374,6 +236,6 @@ def test_sft_capture_failure_never_breaks_diagnosis(tmp_path, monkeypatch):
     bad = tmp_path / "sink.jsonl"
     bad.mkdir()
 
-    diagnosis = _run_anthropic_diagnose(bad)
+    diagnosis = _run_openai_compat_diagnose(monkeypatch, bad)
 
     assert diagnosis.category == "CODE"

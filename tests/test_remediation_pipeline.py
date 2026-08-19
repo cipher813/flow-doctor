@@ -371,7 +371,15 @@ class TestEndToEnd:
             notify=[],
             dependencies=["predictor-training"],
             rate_limits={"max_alerts_per_day": 50, "dedup_cooldown_minutes": 1},
-            diagnosis={"enabled": True, "api_key": "fake-key"},
+            # `provider` has no default since 0.15.0 (AnthropicProvider was
+            # deleted) — must be named explicitly even though the real
+            # provider gets swapped out for `_FakeProvider` below.
+            diagnosis={
+                "enabled": True,
+                "provider": "openai_compat",
+                "api_key": "fake-key",
+                "base_url": "https://openrouter.ai/api/v1",
+            },
             remediation={
                 "enabled": True,
                 "dry_run": True,
@@ -379,8 +387,8 @@ class TestEndToEnd:
             },
         )
 
-        # Inject fake provider (replaces the real AnthropicProvider that would
-        # fail without a valid API key)
+        # Inject fake provider (replaces the real OpenAICompatProvider that
+        # would fail against the fake base_url/api_key above)
         fd._diagnosis_provider = _FakeProvider(category, root_cause, confidence)
 
         # Inject test playbook (no baked-in patterns in generic package)
@@ -596,7 +604,11 @@ class TestEndToEnd:
             },
             diagnosis={
                 "enabled": True,
+                # `provider` has no default since 0.15.0 — see the other
+                # `_make_fd_with_diagnosis` helper above for the same note.
+                "provider": "openai_compat",
                 "api_key": "fake-key",
+                "base_url": "https://openrouter.ai/api/v1",
                 "max_daily_cost_usd": 0.002,
             },
             remediation={"enabled": False},

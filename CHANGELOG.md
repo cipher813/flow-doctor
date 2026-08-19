@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.15.0 (2026-08-19)
+
+### Changed (breaking)
+
+- **The `anthropic` distribution is no longer a dependency of flow-doctor, anywhere.** `AnthropicProvider` (the native-SDK diagnosis transport) and `FixGenerator`'s `provider="anthropic"` branch are both deleted entirely — not deprecated. `pyproject.toml` no longer declares `anthropic` in any extra (`diagnosis`, `agent`, `all`, `dev`); the `diagnosis` extra, which contained nothing else, is removed outright. `krepis`'s own `flow_doctor` extra floors `flow-doctor[diagnosis,s3]`, so this had been forcing the Anthropic SDK onto every `krepis[flow_doctor]` consumer transitively — including repos that had deliberately removed direct LLM exposure (`crucible-executor`, 2026-05-25).
+
+  A config that still names `provider: anthropic` now fails loudly: `flow_doctor.core.client._init_diagnosis` and `flow_doctor.fix.cli.generate_fix` both refuse it explicitly, naming the replacement (`provider: router` + `model_group`, or `provider: openai_compat` + `base_url`). `FixGenerator(provider="anthropic")` raises `ValueError` at construction.
+
+- **`diagnosis.provider` has NO default at all** (was `"anthropic"`). This was the actual defect the above closes: every fleet config that simply omitted `provider:` silently took a direct, unscanned connection to one vendor, with nothing in its own configuration saying so — the $0 Anthropic account balance (alpha-engine-config-I7460) is what made this visible, not the root cause. `diagnosis.enabled: true` with `provider` unset now raises `ConfigError` at config-LOAD time (`load_config`) and at first use (`FlowDoctor._init_diagnosis`, for directly-constructed configs), naming the two valid values: `router` and `openai_compat`. There is no vendor to fall back to.
+
+- **`FixGenerator.__init__`'s `provider` parameter is now a required keyword-only argument** (`*, provider: str`) — no default value, mirroring `DiagnosisConfig.provider`.
+
+### Added
+
+- **`flow_doctor.fix.generator.FixGenerator` gained a `router` transport** (`provider="router"`, `model_group`), mirroring `flow_doctor.diagnosis.provider.RouterProvider`: resolves a krepis capability class (`low`/`med`/`high`/`ultra`) instead of holding a direct provider key, fails closed (`RouterUnresolvable`) on any resolution outside the compelled routes (`litellm_proxy`, `egress_proxy`), and records cost via `krepis.cost.record_llm_call`. Closes alpha-engine-config-I7014 — 0.13.0 shipped `provider: router` support on the diagnosis side only and explicitly refused it for auto-fix.
+- **`flow_doctor.core.router`** (new module) — the krepis-router edge resolution shared by both `RouterProvider` and `FixGenerator`'s router path (`RouterUnresolvable`, `resolve_router_edge`, `COMPELLED_ROUTES`), lifted out of `diagnosis/provider.py` so the compelled-route decision is made in exactly one place. `RouterUnresolvable` remains importable from `flow_doctor.diagnosis.provider` for back-compat.
+- **Guard tests** (`tests/test_endpoint_defaults.py`) asserting the `anthropic` distribution never reappears as a dependency in `pyproject.toml`, no packaged module imports it, and `DiagnosisConfig.provider` / `FixGenerator`'s `provider` parameter carry no default value — the sibling of the existing `test_no_provider_endpoint_literal_in_package` guard.
+
+### Fixed
+
+- **`diagnosis.provider="openai_compat"` with no `api_key` set previously did nothing silently** (`FlowDoctor._init_diagnosis` skipped the branch entirely with no message). It now prints the same fail-closed warning shape as the existing `base_url`-missing case.
+- Removed a dead `anthropic_api_key` settings field (`flow_doctor.core.settings.FlowDoctorSettings`) and its `_ENV_FALLBACKS` entry in `core/client.py` — measured: never wired to any `_env_fallback()` call site, pure dead code carrying a vendor name forward.
+
 ## 0.13.0 (2026-08-12)
 
 ### Changed (breaking)

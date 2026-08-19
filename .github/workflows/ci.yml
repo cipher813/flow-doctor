@@ -23,7 +23,11 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -e ".[dev,diagnosis]"
+          # `diagnosis` (the anthropic SDK extra) was removed in 0.15.0.
+          # `krepis` (the `router` extra) is deliberately excluded here so
+          # tests/test_router_provider.py's "krepis genuinely not installed"
+          # case runs for real rather than being skipped.
+          pip install -e ".[dev]"
 
       - name: Run tests with coverage
         run: |

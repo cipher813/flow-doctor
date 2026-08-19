@@ -70,12 +70,6 @@ class FlowDoctorSettings(BaseSettings):
             "FLOW_DOCTOR_SLACK_WEBHOOK", "SLACK_WEBHOOK_URL"
         ),
     )
-    anthropic_api_key: Optional[str] = Field(
-        default=None,
-        validation_alias=AliasChoices(
-            "FLOW_DOCTOR_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"
-        ),
-    )
     s3_bucket: Optional[str] = Field(
         default=None,
         validation_alias=AliasChoices("FLOW_DOCTOR_S3_BUCKET", "CHANGELOG_BUCKET"),

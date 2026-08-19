@@ -113,8 +113,10 @@ store:
   path: %s
 diagnosis:
   enabled: true
+  provider: openai_compat
+  base_url: http://fake.internal/v1
   model: claude-haiku-4-5
-  api_key: ${ANTHROPIC_API_KEY}
+  api_key: ${OPENROUTER_API_KEY}
 auto_fix:
   enabled: true
   model: claude-haiku-4-5
@@ -135,7 +137,7 @@ auto_fix:
     for var in ("UNSET_EMAIL_SENDER", "UNSET_EMAIL_RECIPIENTS",
                 "UNSET_GMAIL_APP_PASSWORD", "UNSET_FLOW_DOCTOR_GITHUB_TOKEN"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
 
     with patch("flow_doctor.fix.cli.fetch_issue", return_value=issue), \
          patch("flow_doctor.fix.cli.GitHubNotifier.comment_on_issue"):
@@ -267,6 +269,169 @@ def test_generate_fix_no_affected_files():
     assert outcome is FixOutcome.SKIPPED
     assert not outcome.is_error
     assert "No affected files" in msg
+
+
+# --- diagnosis.provider gates (0.15.0 — no default provider) ---
+#
+# Each of these needs a real, readable affected file so the run reaches the
+# provider gates (which sit AFTER the file-read gate) rather than exiting
+# earlier at "No affected files" / "Could not read any affected files".
+
+
+def _provider_gate_issue():
+    return _mock_issue({
+        "report_id": "r1", "diagnosis_id": "d1", "flow_name": "test",
+        "category": "CODE", "confidence": "0.95",
+        "root_cause": "Bug", "remediation": "Fix",
+        "affected_files": "main.py", "error_signature": "sig",
+    })
+
+
+def _write_repo_with_diagnosis_config(tmp_path, diagnosis_yaml_block):
+    (tmp_path / "main.py").write_text("def run():\n    return 1\n")
+    cfg_file = tmp_path / "flow-doctor.yaml"
+    cfg_file.write_text(f"flow_name: test\n{diagnosis_yaml_block}\n")
+    return cfg_file
+
+
+def test_generate_fix_provider_unset_fails_loud(tmp_path):
+    cfg_file = _write_repo_with_diagnosis_config(tmp_path, "")  # no diagnosis: block at all
+    issue = _provider_gate_issue()
+
+    with patch("flow_doctor.fix.cli.fetch_issue", return_value=issue), \
+         patch("flow_doctor.fix.cli.GitHubNotifier.comment_on_issue"):
+        outcome, msg = generate_fix(
+            issue_number=42, repo="owner/repo", token="tok",
+            config_path=str(cfg_file), dry_run=True, repo_path=str(tmp_path),
+        )
+
+    assert outcome is FixOutcome.FAILED
+    assert outcome.is_error
+    assert "diagnosis.provider is not set" in msg
+
+
+def test_generate_fix_provider_anthropic_refused(tmp_path):
+    cfg_file = _write_repo_with_diagnosis_config(
+        tmp_path, "diagnosis:\n  provider: anthropic\n  api_key: k\n"
+    )
+    issue = _provider_gate_issue()
+
+    with patch("flow_doctor.fix.cli.fetch_issue", return_value=issue), \
+         patch("flow_doctor.fix.cli.GitHubNotifier.comment_on_issue"):
+        outcome, msg = generate_fix(
+            issue_number=42, repo="owner/repo", token="tok",
+            config_path=str(cfg_file), dry_run=True, repo_path=str(tmp_path),
+        )
+
+    assert outcome is FixOutcome.FAILED
+    assert "no longer supported" in msg
+    assert "0.15.0" in msg
+
+
+def test_generate_fix_provider_unknown_value_refused(tmp_path):
+    cfg_file = _write_repo_with_diagnosis_config(
+        tmp_path, "diagnosis:\n  provider: bogus\n  api_key: k\n"
+    )
+    issue = _provider_gate_issue()
+
+    with patch("flow_doctor.fix.cli.fetch_issue", return_value=issue), \
+         patch("flow_doctor.fix.cli.GitHubNotifier.comment_on_issue"):
+        outcome, msg = generate_fix(
+            issue_number=42, repo="owner/repo", token="tok",
+            config_path=str(cfg_file), dry_run=True, repo_path=str(tmp_path),
+        )
+
+    assert outcome is FixOutcome.FAILED
+    assert "'router' or 'openai_compat'" in msg
+
+
+def test_generate_fix_router_provider_requires_model_group(tmp_path):
+    cfg_file = _write_repo_with_diagnosis_config(
+        tmp_path, "diagnosis:\n  provider: router\n"
+    )
+    issue = _provider_gate_issue()
+
+    with patch("flow_doctor.fix.cli.fetch_issue", return_value=issue), \
+         patch("flow_doctor.fix.cli.GitHubNotifier.comment_on_issue"):
+        outcome, msg = generate_fix(
+            issue_number=42, repo="owner/repo", token="tok",
+            config_path=str(cfg_file), dry_run=True, repo_path=str(tmp_path),
+        )
+
+    assert outcome is FixOutcome.FAILED
+    assert "model_group" in msg
+
+
+def test_generate_fix_openai_compat_requires_base_url(tmp_path):
+    cfg_file = _write_repo_with_diagnosis_config(
+        tmp_path, "diagnosis:\n  provider: openai_compat\n  api_key: k\n"
+    )
+    issue = _provider_gate_issue()
+
+    with patch("flow_doctor.fix.cli.fetch_issue", return_value=issue), \
+         patch("flow_doctor.fix.cli.GitHubNotifier.comment_on_issue"):
+        outcome, msg = generate_fix(
+            issue_number=42, repo="owner/repo", token="tok",
+            config_path=str(cfg_file), dry_run=True, repo_path=str(tmp_path),
+        )
+
+    assert outcome is FixOutcome.FAILED
+    assert "base_url" in msg
+
+
+def test_generate_fix_router_provider_builds_fix_generator(tmp_path):
+    """The router branch actually constructs a router-mode FixGenerator (no
+    api_key gate) and reaches ``generator.generate()`` — verified by
+    patching FixGenerator.generate directly rather than standing up a fake
+    krepis, since the router transport itself is exercised end-to-end in
+    tests/test_fix_generator_router.py.
+    """
+    cfg_file = _write_repo_with_diagnosis_config(
+        tmp_path, "diagnosis:\n  provider: router\n  model_group: med\n"
+    )
+    issue = _provider_gate_issue()
+
+    diff_text = "--- a/main.py\n+++ b/main.py\n@@ -1,2 +1,2 @@\n def run():\n-    return 1\n+    return 2\n"
+
+    with patch("flow_doctor.fix.cli.fetch_issue", return_value=issue), \
+         patch("flow_doctor.fix.cli.GitHubNotifier.comment_on_issue"), \
+         patch("flow_doctor.fix.cli.FixGenerator.generate", return_value=diff_text) as mock_generate, \
+         patch("flow_doctor.fix.cli.ScopeGuard") as mock_scope_guard_cls:
+        mock_scope_guard_cls.return_value.check.return_value = (True, None)
+        outcome, msg = generate_fix(
+            issue_number=42, repo="owner/repo", token="tok",
+            config_path=str(cfg_file), dry_run=True, repo_path=str(tmp_path),
+        )
+
+    # provider="router" got past every provider gate and reached the LLM
+    # call — what happens to the (unmockable-here) diff-apply/test-run tail
+    # is not this test's concern; test_fix_generator_router.py covers the
+    # router transport itself end-to-end.
+    mock_generate.assert_called_once()
+    assert "provider" not in (msg or "").lower()
+
+
+def test_generate_fix_router_unresolvable_reported_not_crashed(tmp_path):
+    from flow_doctor.core.router import RouterUnresolvable
+
+    cfg_file = _write_repo_with_diagnosis_config(
+        tmp_path, "diagnosis:\n  provider: router\n  model_group: med\n"
+    )
+    issue = _provider_gate_issue()
+
+    with patch("flow_doctor.fix.cli.fetch_issue", return_value=issue), \
+         patch("flow_doctor.fix.cli.GitHubNotifier.comment_on_issue"), \
+         patch(
+             "flow_doctor.fix.cli.FixGenerator.generate",
+             side_effect=RouterUnresolvable("router group 'med' did not resolve"),
+         ):
+        outcome, msg = generate_fix(
+            issue_number=42, repo="owner/repo", token="tok",
+            config_path=str(cfg_file), dry_run=True, repo_path=str(tmp_path),
+        )
+
+    assert outcome is FixOutcome.FAILED
+    assert "could not be resolved" in msg
 
 
 # --- Outcome -> exit-code / comment semantics ---
