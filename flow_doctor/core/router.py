@@ -88,7 +88,7 @@ def resolve_router_edge(model_group: str, *, max_tokens: int = 2048, log_prefix:
         raise RouterUnresolvable(
             f"router group {model_group!r} resolved to route "
             f"{resolved_route!r} (provider={edge_spec.provider!r}), which "
-            f"is not a compelled path — refusing to call a direct "
+            f"is not a compelled path - refusing to call a direct "
             f"provider chosen by fallback (alpha-engine-config-I6367). "
             f"Compelled routes: {sorted(COMPELLED_ROUTES)}"
         )

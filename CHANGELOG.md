@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.15.1 (2026-08-20)
+
+### Fixed
+
+- **Raised exception messages are now Latin-1-safe.** `awslambdaric` (AWS's Lambda Python Runtime Interface Client, upstream) encodes its `post_init_error` response as Latin-1; a `ConfigError` message containing an em-dash crashed `post_init_error` itself with `UnicodeEncodeError` while reporting the original error, degrading a fully-diagnosable `ConfigError` (alpha-engine-data-collector v341's rollback, alpha-engine-config-I7855) into an opaque `Runtime.ExitError` with no parseable `errorMessage`/`errorType`. Fixed em-dash/arrow literals in `core/config.py`, `core/client.py`, `core/router.py`, `notify/github.py`, `notify/telegram.py`. New source-level guard: `tests/test_error_messages_latin1_safe.py` (alpha-engine-config-I7859).
+
 ## 0.15.0 (2026-08-19)
 
 ### Changed (breaking)
