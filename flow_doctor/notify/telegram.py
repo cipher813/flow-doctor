@@ -260,7 +260,7 @@ class TelegramNotifier(Notifier):
 
                     raise ConfigError(
                         f"Telegram bot token preflight failed: HTTP {resp.status}. "
-                        "Verify the token at https://t.me/BotFather (/mybots → API Token)."
+                        "Verify the token at https://t.me/BotFather (/mybots -> API Token)."
                     )
                 body = resp.read().decode("utf-8", errors="replace")
                 parsed = json.loads(body)
@@ -270,7 +270,7 @@ class TelegramNotifier(Notifier):
                     raise ConfigError(
                         "Telegram bot token preflight failed: "
                         f"{parsed.get('description', 'unknown error')}. "
-                        "Verify the token at https://t.me/BotFather (/mybots → API Token)."
+                        "Verify the token at https://t.me/BotFather (/mybots -> API Token)."
                     )
         except URLError as e:
             from flow_doctor.core.errors import ConfigError

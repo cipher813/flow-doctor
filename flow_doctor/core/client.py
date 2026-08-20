@@ -661,7 +661,7 @@ class FlowDoctor:
         if not config.diagnosis.provider:
             raise ConfigError(
                 "diagnosis.enabled=True requires diagnosis.provider to be set "
-                "explicitly — flow-doctor has no default LLM vendor. Valid "
+                "explicitly - flow-doctor has no default LLM vendor. Valid "
                 "values: 'router' (resolve a krepis capability class via "
                 "diagnosis.model_group) or 'openai_compat' (any "
                 "OpenAI-compatible endpoint via diagnosis.base_url)."

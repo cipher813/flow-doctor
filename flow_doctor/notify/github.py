@@ -76,7 +76,7 @@ class GitHubNotifier(Notifier):
                 raise RuntimeError(
                     f"flow-doctor GitHub token rejected by api.github.com "
                     f"(HTTP {code}). Check FLOW_DOCTOR_GITHUB_TOKEN (or "
-                    f"GITHUB_TOKEN) — it may be revoked, expired, or missing "
+                    f"GITHUB_TOKEN) - it may be revoked, expired, or missing "
                     f"the 'repo' scope for {self.repo}."
                 ) from e
             _logger.warning(
