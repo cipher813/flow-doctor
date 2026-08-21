@@ -88,6 +88,8 @@ class WebPushNotifier(Notifier):
             body = report.error_message
         if diagnosis:
             body = f"{body}\n{diagnosis.category}: {diagnosis.root_cause[:150]}"
+        elif report.diagnosis_error:
+            body = f"{body}\nDiagnosis unavailable: {report.diagnosis_error[:150]}"
         if len(body) > _MAX_BODY_LEN:
             body = body[: _MAX_BODY_LEN - 1] + "…"
         return body

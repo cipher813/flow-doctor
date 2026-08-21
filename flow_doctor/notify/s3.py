@@ -376,6 +376,14 @@ def _build_flow_doctor_block(
             "auto_fixable": diagnosis.auto_fixable,
             "llm_model": diagnosis.llm_model,
         }
+    elif report.diagnosis_error:
+        # Diagnosis was attempted (enabled, not rate-limited, not a
+        # warning/cascade) and the provider call itself raised. Distinct
+        # from the "diagnosis" key being absent entirely, which also covers
+        # every case diagnosis was never attempted — a reader querying this
+        # changelog corpus for "how often is diagnosis missing" must be able
+        # to tell "failed" from "not applicable" (alpha-engine-config-I7789).
+        block["diagnosis"] = {"status": "unavailable", "error": report.diagnosis_error}
     return block
 
 

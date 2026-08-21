@@ -1385,7 +1385,31 @@ class FlowDoctor:
             return diagnosis
 
         except Exception as e:
-            print(f"[flow-doctor] Diagnosis failed: {e}", file=sys.stderr)
+            reason = f"{type(e).__name__}: {e}"
+            print(f"[flow-doctor] Diagnosis failed: {reason}", file=sys.stderr)
+            # Loud, not just printed (alpha-engine-config-I7789): a
+            # diagnosis that was attempted and failed — a transport error,
+            # an exhausted credit balance, a router resolution failure — is
+            # stamped onto the report so every notifier renders it, and
+            # recorded as a FAILED Action so it's queryable from the store
+            # the same way a failed notifier send already is. Returning
+            # None (unchanged) keeps this out of notify_on_category gating
+            # and out of _run_remediation — a failed diagnosis attempt must
+            # never be treated as a real one.
+            report.diagnosis_error = reason
+            try:
+                self._store.save_action(Action(
+                    flow_name=self.config.flow_name,
+                    report_id=report.id,
+                    action_type="diagnosis",
+                    status=ActionStatus.FAILED.value,
+                    metadata={"failure_reason": reason},
+                ))
+            except Exception as store_exc:  # noqa: BLE001 - observability must not break reporting
+                _logger.warning(
+                    "flow-doctor: failed to persist diagnosis-failure action "
+                    "for report %s: %s", report.id, store_exc,
+                )
             return None
 
     def _load_git_context(self, report: Optional[Report] = None) -> Optional[dict]:

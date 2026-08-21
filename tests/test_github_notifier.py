@@ -79,6 +79,36 @@ def test_format_body_without_diagnosis():
     assert "## Diagnosis" not in body
 
 
+def test_format_title_with_diagnosis_error():
+    """alpha-engine-config-I7789: a failed diagnosis attempt is loud, not
+    indistinguishable from diagnosis being disabled."""
+    report = _make_report(diagnosis_error="APIError: 400 Bad Request")
+    title = GitHubNotifier._format_title(report, "test-flow")
+    assert title == "[DIAGNOSIS UNAVAILABLE] test-flow: RuntimeError"
+
+
+def test_format_body_with_diagnosis_error():
+    report = _make_report(
+        diagnosis_error="Error code: 400 - credit balance is too low"
+    )
+    body = GitHubNotifier._format_body(report, "test-flow")
+
+    assert "## Diagnosis" in body
+    assert "Unavailable" in body
+    assert "credit balance is too low" in body
+
+
+def test_format_body_diagnosis_error_ignored_when_real_diagnosis_present():
+    """A real diagnosis always wins — diagnosis_error is a fallback signal
+    for when there is nothing else to show, never a competing section."""
+    report = _make_report(diagnosis_error="stale error from a prior attempt")
+    diagnosis = _make_diagnosis()
+    body = GitHubNotifier._format_body(report, "test-flow", diagnosis)
+
+    assert "Logic error in main loop" in body
+    assert "stale error from a prior attempt" not in body
+
+
 def test_format_body_cascade():
     report = _make_report(cascade_source="upstream-flow")
     body = GitHubNotifier._format_body(report, "test-flow")

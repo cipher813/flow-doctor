@@ -192,6 +192,48 @@ def test_report_cascade_skips_diagnosis():
         assert report_id is not None
 
 
+def test_diagnosis_failure_is_loud_not_swallowed(monkeypatch):
+    """alpha-engine-config-I7789: a diagnosis attempt that raises (transport
+    error, exhausted credit balance, etc.) must not be indistinguishable
+    from diagnosis never having run. Previously this only printed to
+    stderr — the report carried no trace of it and no notifier could tell.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".db") as f:
+        config = _make_config(f.name, diagnosis_enabled=True, api_key="test-key")
+        fd = FlowDoctor(config)
+
+        # Force the transport to raise, mirroring the measured 400 from an
+        # exhausted credit balance.
+        broken_client = MagicMock()
+        broken_client.chat.completions.create.side_effect = RuntimeError(
+            "Error code: 400 - credit balance is too low"
+        )
+        import sys
+        import types
+        fake = types.ModuleType("openai")
+        fake.OpenAI = lambda *a, **kw: broken_client
+        monkeypatch.setitem(sys.modules, "openai", fake)
+
+        report_id = fd.report(RuntimeError("pipeline stage crashed"))
+        assert report_id is not None
+
+        # No real diagnosis was produced (this contract is unchanged) ...
+        diag = fd._store.get_diagnosis_by_report(report_id)
+        assert diag is None
+
+        # ... but the failure is recorded as a FAILED Action, queryable from
+        # the store the same way a failed notifier send already is.
+        conn = fd._store._conn()
+        rows = conn.execute(
+            "SELECT status, metadata FROM actions WHERE report_id = ? "
+            "AND action_type = 'diagnosis'",
+            (report_id,),
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["status"] == "failed"
+        assert "credit balance is too low" in rows[0]["metadata"]
+
+
 def test_diagnosis_rate_limiting(monkeypatch):
     """Diagnosis should be rate-limited."""
     with tempfile.NamedTemporaryFile(suffix=".db") as f:

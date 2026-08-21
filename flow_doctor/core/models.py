@@ -93,6 +93,29 @@ class Report:
     error_signature: Optional[str] = None
     dedup_count: int = 1
     cascade_source: Optional[str] = None
+    # Set by ``FlowDoctor._run_diagnosis`` when diagnosis was ATTEMPTED
+    # (enabled, not rate-limited/cost-capped, not a warning/cascade) and the
+    # provider call itself raised — a transport failure, an exhausted
+    # credit balance, a router resolution failure (RouterUnresolvable), a
+    # malformed response, etc. Distinct from ``diagnosis is None``, which
+    # also covers every case where diagnosis was never attempted at all
+    # (disabled, warning severity, cascade, rate-limited, cost-capped) —
+    # those are not failures and must not render as one.
+    #
+    # Deliberately a plain string on Report, not folded into a synthetic
+    # Diagnosis object: a Diagnosis flowing through ``_send_notifications``
+    # is subject to ``notify_on_category`` gating (a notifier scoped to
+    # e.g. ["CODE", "CONFIG"] would silently drop a synthetic diagnosis
+    # whose "category" isn't one of those) and feeds ``_run_remediation``.
+    # Neither must fire off a failed diagnosis attempt. Every notifier
+    # renders this field directly instead, alongside its existing
+    # ``if diagnosis:`` block, so a diagnosis failure reaches every
+    # configured channel exactly like a successful one does — never
+    # silently narrowed by a gate that assumes a real diagnosis (alpha-
+    # engine-config-I7789: previously only printed to stderr, so every
+    # weekly-pipeline failure report this month carried no diagnosis and no
+    # visible reason why).
+    diagnosis_error: Optional[str] = None
     id: str = field(default_factory=_ulid)
     created_at: datetime = field(default_factory=datetime.utcnow)
 
