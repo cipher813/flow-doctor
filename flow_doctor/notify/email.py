@@ -44,6 +44,8 @@ class EmailNotifier(Notifier):
                 subject += f" - {report.error_type}"
             if diagnosis:
                 subject += f" [{diagnosis.category}]"
+            elif report.diagnosis_error:
+                subject += " [DIAGNOSIS UNAVAILABLE]"
 
             body = self._format_body(report, flow_name, diagnosis)
             msg = MIMEText(body, "plain")
@@ -111,6 +113,13 @@ class EmailNotifier(Notifier):
                     lines.append(f"  - {h}")
             if diagnosis.auto_fixable is not None:
                 lines.append(f"\nAuto-fixable: {'Yes' if diagnosis.auto_fixable else 'No'}")
+            lines.append("=" * 50)
+        elif report.diagnosis_error:
+            lines.append("")
+            lines.append("=" * 50)
+            lines.append("DIAGNOSIS: UNAVAILABLE")
+            lines.append("=" * 50)
+            lines.append(f"Diagnosis was attempted and failed: {report.diagnosis_error}")
             lines.append("=" * 50)
 
         if report.traceback:

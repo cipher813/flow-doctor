@@ -224,6 +224,10 @@ class GitHubNotifier(Notifier):
             if report.error_type:
                 return f"[{category}] {flow_name}: {report.error_type}"
             return f"[{category}] {flow_name}: {report.error_message[:80]}"
+        elif report.diagnosis_error:
+            if report.error_type:
+                return f"[DIAGNOSIS UNAVAILABLE] {flow_name}: {report.error_type}"
+            return f"[DIAGNOSIS UNAVAILABLE] {flow_name}: {report.error_message[:80]}"
         else:
             if report.error_type:
                 return f"[{report.severity.upper()}] {flow_name}: {report.error_type}"
@@ -288,6 +292,10 @@ class GitHubNotifier(Notifier):
             if diagnosis.auto_fixable is not None:
                 fixable = "Yes" if diagnosis.auto_fixable else "No"
                 sections.append(f"\n**Auto-fixable:** {fixable}")
+        elif report.diagnosis_error:
+            sections.append("\n## Diagnosis")
+            sections.append(f"⚠️ **Unavailable** — diagnosis was attempted and failed:")
+            sections.append(f"```\n{report.diagnosis_error}\n```")
 
         # Traceback
         if report.traceback:

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.15.2 (2026-08-21)
+
+### Added
+
+- **A failed diagnosis attempt is now loud on every notifier, not just printed to stderr** (alpha-engine-config-I7789). Previously, when `diagnosis.enabled=True` and the provider call itself raised — a transport error, an exhausted credit balance, a router resolution failure (`RouterUnresolvable`) — `FlowDoctor._run_diagnosis` printed `[flow-doctor] Diagnosis failed: ...` and returned `None`, indistinguishable from diagnosis never having run at all (disabled, warning severity, cascade, rate-limited, cost-capped). A month of weekly-pipeline failure reports carried no diagnosis and nothing said why.
+
+  `Report` gained a new field, `diagnosis_error: Optional[str]`, set on the exception path with the failure's `type(e).__name__: e` string and also recorded as a `FAILED` `Action` (`action_type="diagnosis"`) in the store, queryable the same way a failed notifier send already is. `diagnosis_error` is deliberately a plain string on `Report`, not folded into a synthetic `Diagnosis` object: a `Diagnosis` flowing through `_send_notifications` is subject to `notify_on_category` gating and feeds `_run_remediation`, and neither may fire off a failed attempt.
+
+  Every notifier (`email`, `github`, `telegram`, `slack`, `s3`, `webpush`) now renders `report.diagnosis_error` in an `elif` alongside its existing `if diagnosis:` block, so a diagnosis failure reaches every configured channel exactly like a successful diagnosis would — never silently narrowed by a category gate that assumes a real diagnosis. `S3Notifier` emits `"diagnosis": {"status": "unavailable", "error": ...}` in the changelog-corpus entry, distinct from the key being absent entirely.
+
 ## 0.15.1 (2026-08-20)
 
 ### Fixed

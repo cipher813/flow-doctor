@@ -338,6 +338,10 @@ class TelegramNotifier(Notifier):
 
             if diagnosis.remediation:
                 lines.append(f"\n*Remediation:* {diagnosis.remediation[:300]}")
+        elif report.diagnosis_error:
+            lines.append("")
+            lines.append(f"*Diagnosis:* ⚠️ unavailable")
+            lines.append(f"_{report.diagnosis_error[:300]}_")
 
         lines.append(f"\n_Report ID: {report.id}_")
         return "\n".join(lines)
