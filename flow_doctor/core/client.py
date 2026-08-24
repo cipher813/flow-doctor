@@ -8,6 +8,7 @@ import logging
 import os
 import platform
 import sys
+import time
 import traceback as tb_module
 from contextlib import contextmanager
 from datetime import datetime
@@ -300,8 +301,7 @@ class FlowDoctor:
         try:
             self._store = self._init_store(config)
             self._notifiers = self._init_notifiers(config)
-            for _n in self._notifiers:
-                _n.validate()
+            self._run_notifier_preflights(self._notifiers)
             self._dedup = DedupChecker(self._store, config.dedup_cooldown_minutes)
             # flow_name is what makes `max_alerts_per_day` mean per-component
             # rather than per-store. Without it every flow sharing a table drew
@@ -351,6 +351,78 @@ class FlowDoctor:
             )
             import traceback as _tb
             _tb.print_exc(file=sys.stderr)
+
+    # Total wall-clock budget for ALL notifier preflights combined, in
+    # seconds. Preflights run on the import path of the instrumented
+    # process; on AWS Lambda that import sits inside a hard 10s INIT
+    # budget, and N notifiers x one per-call timeout each is unbounded in
+    # N. Override with ``FLOW_DOCTOR_PREFLIGHT_BUDGET_S``.
+    _DEFAULT_PREFLIGHT_BUDGET_S = 10.0
+
+    @classmethod
+    def _preflight_budget(cls) -> float:
+        raw = os.environ.get("FLOW_DOCTOR_PREFLIGHT_BUDGET_S")
+        if not raw:
+            return cls._DEFAULT_PREFLIGHT_BUDGET_S
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0.0
+        if value <= 0:
+            print(
+                f"[flow-doctor] WARNING: FLOW_DOCTOR_PREFLIGHT_BUDGET_S={raw!r} is not a "
+                f"positive number; using {cls._DEFAULT_PREFLIGHT_BUDGET_S}s",
+                file=sys.stderr,
+            )
+            return cls._DEFAULT_PREFLIGHT_BUDGET_S
+        return value
+
+    def _run_notifier_preflights(self, notifiers: List[Notifier]) -> None:
+        """Validate every notifier, bounded in time and tolerant of transport.
+
+        Two invariants this enforces at the CLASS level, so they hold for
+        third-party notifiers too and not only for the ones shipped here
+        (alpha-engine-config-I8298):
+
+        1. **A transport failure never crashes the caller.** An unreachable
+           notification endpoint is an ``OSError`` family failure — timeout,
+           reset, DNS, 5xx. It is logged and preflight continues. This is
+           the same rule ``StorageBackendError`` already gets in
+           ``__init__``: a telemetry dependency must never kill the producer
+           it only instruments over its own transient failure. A genuine
+           credential verdict is raised as ``ConfigError`` / ``RuntimeError``
+           by the notifier and is NOT an ``OSError``, so ``strict`` still
+           fails loud on a revoked token.
+        2. **Preflight is bounded in total.** Once the shared budget is
+           spent, the remaining notifiers are skipped and NAMED in a
+           warning — never silently dropped, because "unvalidated" and
+           "validated fine" must not look the same.
+        """
+        deadline = time.monotonic() + self._preflight_budget()
+        skipped: List[str] = []
+        for _n in notifiers:
+            if time.monotonic() >= deadline:
+                skipped.append(type(_n).__name__)
+                continue
+            try:
+                _n.validate()
+            except OSError as exc:
+                print(
+                    f"[flow-doctor] WARNING: {type(_n).__name__} preflight could not reach "
+                    f"its endpoint ({type(exc).__name__}: {exc}); proceeding with the "
+                    f"notifier enabled and its credential unverified. A monitoring "
+                    f"channel being unreachable is never a reason to stop the workload "
+                    f"it watches.",
+                    file=sys.stderr,
+                )
+        if skipped:
+            print(
+                f"[flow-doctor] WARNING: notifier preflight budget "
+                f"({self._preflight_budget()}s) exhausted; UNVALIDATED: "
+                f"{', '.join(skipped)}. These notifiers are enabled but their "
+                f"credentials were not checked at init.",
+                file=sys.stderr,
+            )
 
     @staticmethod
     def _init_store(config: FlowDoctorConfig) -> StorageBackend:

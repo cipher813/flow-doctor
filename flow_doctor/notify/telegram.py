@@ -28,11 +28,11 @@ import json
 import logging
 import sys
 from typing import Any, Optional, Union
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from flow_doctor.core.models import Diagnosis, Report
-from flow_doctor.notify.base import Notifier
+from flow_doctor.notify.base import Notifier, preflight_timeout
 
 _logger = logging.getLogger("flow_doctor")
 
@@ -242,43 +242,95 @@ class TelegramNotifier(Notifier):
     def validate(self) -> None:
         """Preflight: confirm the bot token is valid via ``getMe``.
 
-        Bypassed when ``FLOW_DOCTOR_SKIP_PREFLIGHT`` is set (mirrors the
-        same env-var contract the other notifiers use for tests / offline
-        boot)."""
+        Raises :class:`ConfigError` only on a **verdict** — a reply in
+        which Telegram itself rejected the credential (HTTP 401/403, or a
+        200 carrying ``ok: false``). Every **transport** outcome — a read
+        or connect timeout, DNS failure, connection reset, 5xx, 429 — is
+        logged as a warning and does NOT block init.
+
+        That split is the contract :class:`GitHubNotifier` and
+        :class:`S3Notifier` already keep, and this notifier did not. Two
+        defects followed from conflating them (alpha-engine-config-I8298):
+
+        * ``TimeoutError`` is not a :class:`URLError` subclass, so a read
+          timeout escaped the handler entirely and propagated out of
+          ``FlowDoctor.__init__`` under ``strict``, killing the host
+          process at import. On 2026-08-24 that took out the trading
+          pipeline's market-hours gate and its deploy-drift gate on one
+          unreachable ``api.telegram.org``.
+        * :class:`HTTPError` IS a :class:`URLError` subclass, so a genuine
+          401 was reported as "network" — the inverse error, from the same
+          conflation.
+
+        A monitoring channel that cannot be reached is a reason to warn,
+        never a reason to stop the workload it was only there to watch.
+
+        Bypassed entirely when ``FLOW_DOCTOR_SKIP_PREFLIGHT`` is set
+        (mirrors the same env-var contract the other notifiers use for
+        tests / offline boot).
+        """
         import os
 
         if os.environ.get("FLOW_DOCTOR_SKIP_PREFLIGHT"):
             return None
+
+        from flow_doctor.core.errors import ConfigError
+
         try:
             req = Request(
                 f"{self._API_BASE}/bot{self.bot_token}/getMe",
                 method="GET",
             )
-            with urlopen(req, timeout=10) as resp:
+            with urlopen(req, timeout=preflight_timeout()) as resp:
                 if resp.status != 200:
-                    from flow_doctor.core.errors import ConfigError
-
-                    raise ConfigError(
-                        f"Telegram bot token preflight failed: HTTP {resp.status}. "
-                        "Verify the token at https://t.me/BotFather (/mybots -> API Token)."
+                    # urlopen raises HTTPError for >=400, so anything that
+                    # lands here is a 2xx/3xx anomaly, not a credential
+                    # verdict. Report it; do not block startup on it.
+                    _logger.warning(
+                        "flow-doctor Telegram preflight returned HTTP %s "
+                        "(not an auth verdict, proceeding)",
+                        resp.status,
                     )
+                    return None
                 body = resp.read().decode("utf-8", errors="replace")
-                parsed = json.loads(body)
+                try:
+                    parsed = json.loads(body)
+                except json.JSONDecodeError:
+                    # A non-JSON 200 is a captive portal / proxy
+                    # interstitial, not Telegram answering about the token.
+                    _logger.warning(
+                        "flow-doctor Telegram preflight returned non-JSON "
+                        "(not an auth verdict, proceeding)",
+                    )
+                    return None
                 if not parsed.get("ok"):
-                    from flow_doctor.core.errors import ConfigError
-
                     raise ConfigError(
                         "Telegram bot token preflight failed: "
                         f"{parsed.get('description', 'unknown error')}. "
                         "Verify the token at https://t.me/BotFather (/mybots -> API Token)."
                     )
-        except URLError as e:
-            from flow_doctor.core.errors import ConfigError
-
-            raise ConfigError(
-                f"Telegram bot token preflight failed (network): {e}. "
-                "Check connectivity to api.telegram.org or set "
-                "FLOW_DOCTOR_SKIP_PREFLIGHT=1 to defer the check."
+        except HTTPError as e:
+            # Telegram ANSWERED. 401/403 is a verdict on the credential;
+            # anything else it returns is its problem, not our config.
+            if e.code in (401, 403):
+                raise ConfigError(
+                    f"Telegram bot token rejected by api.telegram.org (HTTP {e.code}). "
+                    "Verify the token at https://t.me/BotFather (/mybots -> API Token)."
+                ) from e
+            _logger.warning(
+                "flow-doctor Telegram preflight returned HTTP %s "
+                "(not an auth verdict, proceeding): %s",
+                e.code, e,
+            )
+        except (URLError, TimeoutError, OSError) as e:
+            # Transport. `TimeoutError` is listed explicitly because it is
+            # NOT a URLError subclass — it is exactly what a read timeout
+            # against a slow api.telegram.org raises, and it is what
+            # crashed the predictor Lambda at import on 2026-08-24.
+            _logger.warning(
+                "flow-doctor Telegram preflight unreachable (proceeding, "
+                "token unverified): %s: %s",
+                type(e).__name__, e,
             )
 
     # ----- helpers --------------------------------------------------------

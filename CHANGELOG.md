@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.16.0 (2026-08-24)
+
+### Fixed
+
+- **A notifier preflight can no longer crash the process it instruments** (alpha-engine-config-I8298). `TelegramNotifier.validate()` treated every failure to reach `api.telegram.org` as a verdict on the bot token and raised `ConfigError`; worse, its handler was `except URLError`, and `TimeoutError` is *not* a `URLError` subclass, so a read timeout escaped uncaught and propagated out of `FlowDoctor.__init__` under `strict=True`. Because `krepis.setup_logging` runs at module level in Lambda handlers, the import itself failed. On 2026-08-24 roughly 90 seconds of an unresponsive `api.telegram.org` took down `alpha-engine-predictor-inference` through five retries, and the postclose trading pipeline ran with both its MarketHoursGate and its DeployDriftCheck degraded — two safety gates lost to one unreachable alerting host.
+
+  The inverse error came from the same conflation: `HTTPError` *is* a `URLError` subclass, so a genuine 401 was reported as a network problem. Preflight now splits the two. A **verdict** — HTTP 401/403, or a 200 carrying `ok: false` — raises `ConfigError` and still fails loud under `strict`. Every **transport** outcome — connect/read timeout, DNS failure, reset, 5xx, 429, a non-JSON 200 from a captive portal — logs a warning and proceeds with the notifier enabled and its credential unverified. That is the contract `GitHubNotifier` and `S3Notifier` already documented and kept.
+
+  `GitHubNotifier.validate()` carried the identical `except URLError` defect and is fixed the same way.
+
+- **The transport-never-crashes-the-caller rule is now enforced at the class level**, in `FlowDoctor._run_notifier_preflights`, so it holds for third-party notifiers too and not only for the ones shipped here. An `OSError`-family failure from any notifier's `validate()` is reported to stderr and preflight continues to the next notifier; `ConfigError`/`RuntimeError` are untouched and still raise under `strict`. This extends to notifiers the carve-out `StorageBackendError` already had: a telemetry dependency must never kill the producer it only instruments over its own transient failure.
+
+### Added
+
+- **Notifier preflight is bounded in time.** Preflights run on the import path of the instrumented process, and on AWS Lambda that import sits inside a hard 10-second INIT budget — the 2026-08-24 failure's first attempt logged `Init Duration: 9999.42 ms  Phase: init  Status: timeout`. The per-call socket timeout drops from a hardcoded 10s to `DEFAULT_PREFLIGHT_TIMEOUT_S` (3s, override with `FLOW_DOCTOR_PREFLIGHT_TIMEOUT_S`), and all notifier preflights now share a total wall-clock budget of 10s (override with `FLOW_DOCTOR_PREFLIGHT_BUDGET_S`). Notifiers skipped because the budget was spent are **named** in a warning rather than silently treated as validated. Both env vars fall back to the default on an unparseable or non-positive value — an unbounded preflight is the failure mode they exist to prevent.
+
 ## 0.15.2 (2026-08-21)
 
 ### Added
