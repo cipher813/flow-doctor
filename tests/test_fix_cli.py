@@ -290,7 +290,17 @@ def _provider_gate_issue():
 def _write_repo_with_diagnosis_config(tmp_path, diagnosis_yaml_block):
     (tmp_path / "main.py").write_text("def run():\n    return 1\n")
     cfg_file = tmp_path / "flow-doctor.yaml"
-    cfg_file.write_text(f"flow_name: test\n{diagnosis_yaml_block}\n")
+    # `store` MUST be pinned to tmp_path: past the provider gates, generate_fix
+    # opens a real SQLiteStorage at config.store.path (default "flow_doctor.db",
+    # resolved relative to cwd — i.e. the repo root during a pytest run) to
+    # check the replay store for prior rejections. Without this, tests that
+    # reach that code path silently create/modify the repo's tracked
+    # flow_doctor.db (alpha-engine-config-I8299).
+    store_path = tmp_path / "fd.db"
+    cfg_file.write_text(
+        f"flow_name: test\nstore:\n  type: sqlite\n  path: {store_path}\n"
+        f"{diagnosis_yaml_block}\n"
+    )
     return cfg_file
 
 
