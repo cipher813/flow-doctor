@@ -25,6 +25,12 @@ build/
 pytest-of-*/
 tmp*.db
 
+# Test/runtime residue — flow_doctor.db is the default sqlite store path and
+# gets written by anything run from the repo root without an explicit store
+# override (alpha-engine-config-I8299)
+/flow_doctor.db
+*.db
+
 # Design docs (local only)
 *-design-*.md
 *-design.md

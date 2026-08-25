@@ -34,6 +34,19 @@ jobs:
           python -m coverage run -m pytest tests/ -v --ignore=tests/test_notifications.py
           python -m coverage report
 
+      - name: Verify the test suite left the checkout clean
+        # A tracked file mutated by the suite (alpha-engine-config-I8299 —
+        # flow_doctor.db was tracked AND written by pytest) or a new
+        # untracked file left behind is test residue that must be
+        # gitignored or fixtured with tmp_path, not discovered by hand.
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::pytest left the checkout dirty — a test wrote to a tracked or untracked repo file instead of tmp_path:"
+            git status --porcelain
+            git diff
+            exit 1
+          fi
+
       - name: Security audit
         run: |
           pip install pip-audit
