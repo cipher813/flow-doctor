@@ -32,7 +32,11 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from flow_doctor.core.models import Diagnosis, Report
-from flow_doctor.notify.base import Notifier, preflight_timeout
+from flow_doctor.notify.base import (
+    PREFLIGHT_UNREACHABLE_MARKER,
+    Notifier,
+    preflight_timeout,
+)
 
 _logger = logging.getLogger("flow_doctor")
 
@@ -328,9 +332,9 @@ class TelegramNotifier(Notifier):
             # against a slow api.telegram.org raises, and it is what
             # crashed the predictor Lambda at import on 2026-08-24.
             _logger.warning(
-                "flow-doctor Telegram preflight unreachable (proceeding, "
+                "%s flow-doctor Telegram preflight unreachable (proceeding, "
                 "token unverified): %s: %s",
-                type(e).__name__, e,
+                PREFLIGHT_UNREACHABLE_MARKER, type(e).__name__, e,
             )
 
     # ----- helpers --------------------------------------------------------

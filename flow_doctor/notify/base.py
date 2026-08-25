@@ -24,6 +24,23 @@ _logger = logging.getLogger("flow_doctor")
 # caller's startup time.
 DEFAULT_PREFLIGHT_TIMEOUT_S = 3.0
 
+# Stable log markers for the two preflight outcomes a detector needs to see.
+#
+# A metric filter matching PROSE is a detector shaped to one notifier: the
+# first filter written for this (alpha-engine-config-I8298 deliverable 5)
+# matched "preflight unreachable", which is TelegramNotifier's wording alone
+# and misses the class-level guard in `FlowDoctor._run_notifier_preflights`
+# — the one covering every notifier including third-party ones — and misses
+# GitHubNotifier entirely. That is a detector that would have caught the
+# 2026-08-24 incident and nothing else like it.
+#
+# Every code path that reports a preflight it could not complete emits one of
+# these tokens, so a filter matches the CONDITION rather than a sentence, and
+# the prose stays free to change. Mirrors the `[LEGACY_PRICE_READ]` marker
+# convention already in use on the alpha-engine Lambda log groups.
+PREFLIGHT_UNREACHABLE_MARKER = "[FLOW_DOCTOR_PREFLIGHT_UNREACHABLE]"
+PREFLIGHT_UNVALIDATED_MARKER = "[FLOW_DOCTOR_PREFLIGHT_UNVALIDATED]"
+
 
 def preflight_timeout() -> float:
     """Per-call socket timeout for notifier preflights, in seconds.
