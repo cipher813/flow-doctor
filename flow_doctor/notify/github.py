@@ -10,7 +10,11 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from flow_doctor.core.models import Diagnosis, Report
-from flow_doctor.notify.base import Notifier, preflight_timeout
+from flow_doctor.notify.base import (
+    PREFLIGHT_UNREACHABLE_MARKER,
+    Notifier,
+    preflight_timeout,
+)
 
 _logger = logging.getLogger("flow_doctor")
 
@@ -86,8 +90,8 @@ class GitHubNotifier(Notifier):
                     f"the 'repo' scope for {self.repo}."
                 ) from e
             _logger.warning(
-                "flow-doctor GitHub preflight non-auth error (proceeding): %s",
-                reason,
+                "%s flow-doctor GitHub preflight non-auth error (proceeding): %s",
+                PREFLIGHT_UNREACHABLE_MARKER, reason,
             )
 
     def send(

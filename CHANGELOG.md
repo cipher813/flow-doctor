@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.16.1 (2026-08-25)
+
+### Added
+
+- **Every preflight-unreachable path now emits a stable log marker** — `[FLOW_DOCTOR_PREFLIGHT_UNREACHABLE]`, with `[FLOW_DOCTOR_PREFLIGHT_UNVALIDATED]` for the separate budget-exhaustion condition (alpha-engine-config-I8298 deliverable 5). A metric filter is how this signal LEAVES a process by a path the failing process does not control: on 2026-08-24 the only alerting transport `alpha-engine-predictor-inference` had was Telegram, which was the thing that was unreachable, so a log-derived metric is the answer to that circularity.
+
+  The first filter written for it matched the prose `"preflight unreachable"` — `TelegramNotifier`'s wording alone. It would have caught the incident that prompted it and nothing else like it: not the class-level guard in `FlowDoctor._run_notifier_preflights` covering every notifier including third-party ones, and not `GitHubNotifier`, which carried the identical `except URLError` defect fixed in 0.16.0. The markers let a filter match the **condition** instead of a sentence, and leave the prose free to change. `tests/test_preflight_log_markers.py` is the contract that keeps them on every path, including an assertion that they stay safe to quote verbatim in a CloudWatch filter pattern.
+
+  Convention mirrors the `[LEGACY_PRICE_READ]` marker already in use on the alpha-engine Lambda log groups.
+
 ## 0.16.0 (2026-08-24)
 
 ### Fixed

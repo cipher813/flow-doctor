@@ -37,7 +37,11 @@ from flow_doctor.core.models import (
 )
 from flow_doctor.core.rate_limiter import CascadeDetector, RateLimiter
 from flow_doctor.core.scrubber import Scrubber
-from flow_doctor.notify.base import Notifier
+from flow_doctor.notify.base import (
+    PREFLIGHT_UNREACHABLE_MARKER,
+    PREFLIGHT_UNVALIDATED_MARKER,
+    Notifier,
+)
 from flow_doctor.storage.base import StorageBackend
 
 # Module logger — used to surface notifier failures to the host app's log stream
@@ -408,7 +412,8 @@ class FlowDoctor:
                 _n.validate()
             except OSError as exc:
                 print(
-                    f"[flow-doctor] WARNING: {type(_n).__name__} preflight could not reach "
+                    f"[flow-doctor] WARNING: {PREFLIGHT_UNREACHABLE_MARKER} "
+                    f"{type(_n).__name__} preflight could not reach "
                     f"its endpoint ({type(exc).__name__}: {exc}); proceeding with the "
                     f"notifier enabled and its credential unverified. A monitoring "
                     f"channel being unreachable is never a reason to stop the workload "
@@ -417,7 +422,8 @@ class FlowDoctor:
                 )
         if skipped:
             print(
-                f"[flow-doctor] WARNING: notifier preflight budget "
+                f"[flow-doctor] WARNING: {PREFLIGHT_UNVALIDATED_MARKER} "
+                f"notifier preflight budget "
                 f"({self._preflight_budget()}s) exhausted; UNVALIDATED: "
                 f"{', '.join(skipped)}. These notifiers are enabled but their "
                 f"credentials were not checked at init.",
