@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import io
 import json
+import socket
 import sys
 import tempfile
 from unittest.mock import MagicMock, patch
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -22,6 +24,10 @@ from flow_doctor import (
 from flow_doctor.core.config import NotifyChannelConfig
 from flow_doctor.core.errors import ConfigError
 from flow_doctor.core.models import ActionType, Report, Severity
+from flow_doctor.notify.base import (
+    DEFAULT_PREFLIGHT_TIMEOUT_S,
+    preflight_timeout,
+)
 from flow_doctor.notify.telegram import (
     _MAX_MESSAGE_LEN,
     TelegramNotifier,
@@ -444,3 +450,100 @@ def test_validate_raises_on_unauthorized_bot_token(monkeypatch):
             notifier.validate()
     assert "Unauthorized" in str(exc.value)
     assert "BotFather" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Preflight: transport vs verdict (alpha-engine-config-I8298)
+#
+# A preflight answers ONE question: did Telegram reject this credential?
+# Only an answer to that question may raise. Every failure to GET an answer
+# — timeout, reset, DNS, 5xx — warns and proceeds, because this preflight
+# runs on the import path of the process flow-doctor instruments, and on
+# 2026-08-24 raising there killed `alpha-engine-predictor-inference` at
+# import and took the trading pipeline's market-hours and deploy-drift
+# gates with it.
+# ---------------------------------------------------------------------------
+
+
+def _http_error(code: int) -> HTTPError:
+    return HTTPError(
+        url="https://api.telegram.org/botX/getMe",
+        code=code,
+        msg="err",
+        hdrs=None,  # type: ignore[arg-type]
+        fp=io.BytesIO(b""),
+    )
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        TimeoutError("The read operation timed out"),
+        socket.timeout("timed out"),
+        URLError("Name or service not known"),
+        ConnectionResetError("reset by peer"),
+    ],
+    ids=["read-timeout", "socket-timeout", "urlerror", "conn-reset"],
+)
+def test_validate_never_raises_on_transport_failure(monkeypatch, exc):
+    monkeypatch.delenv("FLOW_DOCTOR_SKIP_PREFLIGHT", raising=False)
+    notifier = TelegramNotifier(bot_token="t", chat_id=1)
+    with patch("flow_doctor.notify.telegram.urlopen", side_effect=exc):
+        assert notifier.validate() is None
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_validate_raises_on_auth_verdict_http(monkeypatch, code):
+    monkeypatch.delenv("FLOW_DOCTOR_SKIP_PREFLIGHT", raising=False)
+    notifier = TelegramNotifier(bot_token="bad", chat_id=1)
+    with patch("flow_doctor.notify.telegram.urlopen", side_effect=_http_error(code)):
+        with pytest.raises(ConfigError) as exc:
+            notifier.validate()
+    assert str(code) in str(exc.value)
+    assert "BotFather" in str(exc.value)
+
+
+@pytest.mark.parametrize("code", [429, 500, 502, 503])
+def test_validate_does_not_raise_on_non_auth_http_status(monkeypatch, code):
+    """Telegram answered, but not about the token. Not our config to fail on."""
+    monkeypatch.delenv("FLOW_DOCTOR_SKIP_PREFLIGHT", raising=False)
+    notifier = TelegramNotifier(bot_token="t", chat_id=1)
+    with patch("flow_doctor.notify.telegram.urlopen", side_effect=_http_error(code)):
+        assert notifier.validate() is None
+
+
+def test_validate_does_not_raise_on_non_json_200(monkeypatch):
+    """A captive-portal interstitial is not Telegram answering about the token."""
+    monkeypatch.delenv("FLOW_DOCTOR_SKIP_PREFLIGHT", raising=False)
+    notifier = TelegramNotifier(bot_token="t", chat_id=1)
+    resp = MagicMock()
+    resp.status = 200
+    resp.read.return_value = b"<html>captive portal</html>"
+    resp.__enter__ = lambda self: self
+    resp.__exit__ = lambda self, *a: False
+    with patch("flow_doctor.notify.telegram.urlopen", return_value=resp):
+        assert notifier.validate() is None
+
+
+def test_validate_preflight_timeout_is_bounded_and_overridable(monkeypatch):
+    """Unbounded preflight is what exhausted Lambda's 10s INIT budget."""
+    monkeypatch.delenv("FLOW_DOCTOR_SKIP_PREFLIGHT", raising=False)
+    monkeypatch.delenv("FLOW_DOCTOR_PREFLIGHT_TIMEOUT_S", raising=False)
+    notifier = TelegramNotifier(bot_token="t", chat_id=1)
+    with patch("flow_doctor.notify.telegram.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _fake_urlopen_response({"ok": True})
+        notifier.validate()
+    assert mock_urlopen.call_args.kwargs["timeout"] == DEFAULT_PREFLIGHT_TIMEOUT_S
+    assert DEFAULT_PREFLIGHT_TIMEOUT_S <= 5
+
+    monkeypatch.setenv("FLOW_DOCTOR_PREFLIGHT_TIMEOUT_S", "1.5")
+    with patch("flow_doctor.notify.telegram.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _fake_urlopen_response({"ok": True})
+        notifier.validate()
+    assert mock_urlopen.call_args.kwargs["timeout"] == 1.5
+
+
+@pytest.mark.parametrize("raw", ["nonsense", "0", "-4"])
+def test_preflight_timeout_falls_back_rather_than_unbounding(monkeypatch, raw):
+    monkeypatch.setenv("FLOW_DOCTOR_PREFLIGHT_TIMEOUT_S", raw)
+    assert preflight_timeout() == DEFAULT_PREFLIGHT_TIMEOUT_S

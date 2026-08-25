@@ -2,10 +2,55 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from abc import ABC, abstractmethod
 from typing import Optional, Set
 
 from flow_doctor.core.models import Diagnosis, Report
+
+_logger = logging.getLogger("flow_doctor")
+
+# Default per-call socket timeout for a notifier preflight, in seconds.
+#
+# Deliberately small. A preflight runs on the IMPORT path of the process
+# flow-doctor instruments, and on AWS Lambda that import happens inside a
+# hard 10-second INIT budget. On 2026-08-24 a 10s-per-call preflight
+# against an unresponsive api.telegram.org consumed the whole INIT budget
+# of `alpha-engine-predictor-inference` and the trading pipeline's
+# market-hours gate could not run (alpha-engine-config-I8298). A preflight
+# is a cheap reachability probe, not a retry loop: if the endpoint has not
+# answered in a few seconds, the answer we would get is not worth the
+# caller's startup time.
+DEFAULT_PREFLIGHT_TIMEOUT_S = 3.0
+
+
+def preflight_timeout() -> float:
+    """Per-call socket timeout for notifier preflights, in seconds.
+
+    Override with ``FLOW_DOCTOR_PREFLIGHT_TIMEOUT_S``. An unparseable or
+    non-positive value falls back to :data:`DEFAULT_PREFLIGHT_TIMEOUT_S`
+    with a warning rather than disabling the bound — an unbounded
+    preflight is the failure mode this exists to prevent.
+    """
+    raw = os.environ.get("FLOW_DOCTOR_PREFLIGHT_TIMEOUT_S")
+    if not raw:
+        return DEFAULT_PREFLIGHT_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        _logger.warning(
+            "FLOW_DOCTOR_PREFLIGHT_TIMEOUT_S=%r is not a number; using %ss",
+            raw, DEFAULT_PREFLIGHT_TIMEOUT_S,
+        )
+        return DEFAULT_PREFLIGHT_TIMEOUT_S
+    if value <= 0:
+        _logger.warning(
+            "FLOW_DOCTOR_PREFLIGHT_TIMEOUT_S=%r is not positive; using %ss",
+            raw, DEFAULT_PREFLIGHT_TIMEOUT_S,
+        )
+        return DEFAULT_PREFLIGHT_TIMEOUT_S
+    return value
 
 
 class Notifier(ABC):

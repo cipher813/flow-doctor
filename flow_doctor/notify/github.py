@@ -10,7 +10,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from flow_doctor.core.models import Diagnosis, Report
-from flow_doctor.notify.base import Notifier
+from flow_doctor.notify.base import Notifier, preflight_timeout
 
 _logger = logging.getLogger("flow_doctor")
 
@@ -62,14 +62,20 @@ class GitHubNotifier(Notifier):
                 },
                 method="GET",
             )
-            with urlopen(req, timeout=10) as resp:
+            with urlopen(req, timeout=preflight_timeout()) as resp:
                 if resp.status == 200:
                     return
                 _logger.warning(
                     "flow-doctor GitHub preflight returned HTTP %s (non-401, proceeding)",
                     resp.status,
                 )
-        except URLError as e:
+        except (URLError, TimeoutError, OSError) as e:
+            # `TimeoutError` is listed explicitly: it is NOT a URLError
+            # subclass, so a read timeout used to escape this handler
+            # entirely and propagate out of ``FlowDoctor.__init__`` under
+            # ``strict`` — the same defect that crashed the predictor
+            # Lambda through the Telegram preflight
+            # (alpha-engine-config-I8298).
             reason = getattr(e, "reason", e)
             code = getattr(e, "code", None)
             if code in (401, 403):
