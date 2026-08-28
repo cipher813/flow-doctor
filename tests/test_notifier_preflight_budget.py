@@ -104,6 +104,45 @@ def test_budget_falls_back_rather_than_unbounding(monkeypatch, raw):
     assert FlowDoctor._preflight_budget() == FlowDoctor._DEFAULT_PREFLIGHT_BUDGET_S
 
 
+def test_slow_call_in_flight_does_not_block_past_the_budget(monkeypatch, capsys):
+    """alpha-engine-config-I9102: the budget must bound a call ALREADY IN
+    FLIGHT, not just gate whether the NEXT notifier gets to start.
+
+    Before this fix, ``_run_notifier_preflights`` called ``validate()``
+    synchronously on the main thread — the pre-loop budget check only
+    decided whether to START a notifier's preflight, and did nothing once
+    a call was already running. A notifier whose own transport has no
+    internal timeout (a bare ``boto3.client()`` defaults to 60s
+    connect + 60s read + up to 5 retries) could single-handedly consume
+    the entire budget and then some, which is exactly what turned a
+    Lambda's 1.6s of real handler work into a 300s `States.Timeout` on
+    the live `eval_rolling_mean` weekly run. This asserts the bound is
+    now HARD: a notifier's own call cannot make the whole preflight step
+    run any longer than the configured budget, even mid-call.
+    """
+    import time as _t
+
+    monkeypatch.setenv("FLOW_DOCTOR_PREFLIGHT_BUDGET_S", "0.1")
+    # Far longer than the budget — stands in for an unbounded transport
+    # call (e.g. S3's default botocore timeouts) that never returns on its
+    # own inside the budget window.
+    stuck = _Recorder("stuck", delay=5.0)
+
+    started = _t.monotonic()
+    _fd()._run_notifier_preflights([stuck])
+    elapsed = _t.monotonic() - started
+
+    # The call is still sleeping on its abandoned daemon thread — this
+    # process must not have waited for it.
+    assert elapsed < 1.0, (
+        f"_run_notifier_preflights blocked for {elapsed:.2f}s against a 0.1s "
+        f"budget — a slow notifier call is still able to hold up the caller"
+    )
+    err = capsys.readouterr().err
+    assert "UNVALIDATED" in err
+    assert "timed out mid-call" in err
+
+
 def test_unreachable_telegram_does_not_break_strict_init(tmp_path, monkeypatch):
     """The end-to-end invariant, at the layer the predictor Lambda hits."""
     monkeypatch.delenv("FLOW_DOCTOR_SKIP_PREFLIGHT", raising=False)

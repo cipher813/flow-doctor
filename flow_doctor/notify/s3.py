@@ -67,6 +67,53 @@ SEVERITY_MAP: Dict[str, str] = {
     "warning": "medium",
 }
 
+# botocore's default client has NO explicit timeout — connect_timeout=60,
+# read_timeout=60, and "legacy" retry mode retries up to 5 times, each
+# incurring a fresh connect+read cycle on a connection failure. A single
+# ``boto3.client("s3")`` call with no ``Config`` can therefore hang for
+# several minutes on a degraded network path (a stalled NAT/VPC endpoint,
+# a throttled S3 API). ``validate()`` runs this synchronously inside
+# ``FlowDoctor.__init__``, on every cold start, before the host app's own
+# handler code runs — an unbounded S3 call there is a producer-killing
+# defect, not a cosmetic slowness (alpha-engine-config-I9102: this exact
+# path put a Lambda's own 1.6s of work behind a 300s timeout). Bound every
+# S3 client this module constructs so the worst case for one call is
+# ~(connect_timeout + read_timeout) * max_attempts, not an open-ended hang.
+#
+# WHY botocore is imported defensively: boto3 is a SOFT dependency of this
+# package — every call site imports it lazily and this module's tests supply a
+# ``sys.modules["boto3"]`` double precisely because the real one is not
+# installed in the test environment. botocore ships WITH boto3, so its absence
+# means boto3 itself is a stub, and a stub has no sockets to bound. Importing it
+# unconditionally made 18 tests fail in CI while passing on any machine that
+# happened to have boto3 installed — the bound is real where it matters and
+# unavailable exactly where it is meaningless.
+def _bounded_s3_client():
+    import boto3
+
+    try:
+        from botocore.config import Config as _BotoConfig
+    except ImportError:
+        # Not a silent degrade: say so, and say what is unbounded. Reaching this
+        # with a REAL boto3 installed would be a genuinely broken install, and
+        # the warning is what makes that visible rather than slow.
+        _logger.warning(
+            "botocore unavailable — constructing the S3 client WITHOUT timeout "
+            "bounds. Expected only where boto3 is a test double; with a real "
+            "boto3 this means an unbounded client and alpha-engine-config-I9102 "
+            "can recur."
+        )
+        return boto3.client("s3")
+
+    return boto3.client(
+        "s3",
+        config=_BotoConfig(
+            connect_timeout=3,
+            read_timeout=5,
+            retries={"max_attempts": 2, "mode": "standard"},
+        ),
+    )
+
 
 class S3Notifier(Notifier):
     """Send flow-doctor reports to the system-wide changelog S3 corpus.
@@ -144,7 +191,7 @@ class S3Notifier(Notifier):
                 "pip install 'flow-doctor[s3]'"
             ) from e
         try:
-            client = boto3.client("s3")
+            client = _bounded_s3_client()
             client.head_bucket(Bucket=self.bucket)
         except Exception as e:  # noqa: BLE001
             # Soft-fail like GitHubNotifier on transient/network — don't
@@ -221,8 +268,7 @@ class S3Notifier(Notifier):
         # Lazy import keeps boto3 a soft dep — flow-doctor's other notifiers
         # don't need it, so installs that don't use the s3 type don't need
         # to pull it in.
-        import boto3
-        client = boto3.client("s3")
+        client = _bounded_s3_client()
         client.put_object(
             Bucket=self.bucket,
             Key=key,
@@ -277,8 +323,7 @@ def write_heartbeat(
             "status": status,
         }
         # Lazy import keeps boto3 a soft dep, matching S3Notifier._put_object.
-        import boto3
-        client = boto3.client("s3")
+        client = _bounded_s3_client()
         client.put_object(
             Bucket=bucket,
             Key=key,
