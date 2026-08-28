@@ -79,9 +79,31 @@ SEVERITY_MAP: Dict[str, str] = {
 # path put a Lambda's own 1.6s of work behind a 300s timeout). Bound every
 # S3 client this module constructs so the worst case for one call is
 # ~(connect_timeout + read_timeout) * max_attempts, not an open-ended hang.
+#
+# WHY botocore is imported defensively: boto3 is a SOFT dependency of this
+# package — every call site imports it lazily and this module's tests supply a
+# ``sys.modules["boto3"]`` double precisely because the real one is not
+# installed in the test environment. botocore ships WITH boto3, so its absence
+# means boto3 itself is a stub, and a stub has no sockets to bound. Importing it
+# unconditionally made 18 tests fail in CI while passing on any machine that
+# happened to have boto3 installed — the bound is real where it matters and
+# unavailable exactly where it is meaningless.
 def _bounded_s3_client():
     import boto3
-    from botocore.config import Config as _BotoConfig
+
+    try:
+        from botocore.config import Config as _BotoConfig
+    except ImportError:
+        # Not a silent degrade: say so, and say what is unbounded. Reaching this
+        # with a REAL boto3 installed would be a genuinely broken install, and
+        # the warning is what makes that visible rather than slow.
+        _logger.warning(
+            "botocore unavailable — constructing the S3 client WITHOUT timeout "
+            "bounds. Expected only where boto3 is a test double; with a real "
+            "boto3 this means an unbounded client and alpha-engine-config-I9102 "
+            "can recur."
+        )
+        return boto3.client("s3")
 
     return boto3.client(
         "s3",

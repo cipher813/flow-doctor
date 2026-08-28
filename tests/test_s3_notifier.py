@@ -510,3 +510,92 @@ class TestEmitHeartbeatClientMethod:
         with patch("flow_doctor.notify.s3.write_heartbeat") as mock_write:
             fd.emit_heartbeat("b", prefix="health/hb")
         assert mock_write.call_args.kwargs["prefix"] == "health/hb"
+
+
+class TestBoundedClientWithoutBotocore:
+    """boto3 is a SOFT dependency, so botocore may be absent — the bound must not
+    become a hard import.
+
+    alpha-engine-config-I9102. The first cut of ``_bounded_s3_client`` imported
+    ``botocore.config`` unconditionally. Every machine with boto3 installed has
+    botocore too, so the whole suite passed locally while 18 of these tests failed
+    in CI, where boto3 is absent and supplied as a ``sys.modules`` double. The
+    failure mode is the worst kind: green on the author's machine, red only where
+    it is checked, and the symptom (``TypeError: 'NoneType' object is not
+    subscriptable``) names neither boto3 nor botocore.
+    """
+
+    class _StubClient:
+        """Minimal stand-in — these tests only care how the client is BUILT."""
+
+        def __init__(self):
+            self.calls = []
+
+        def put_object(self, **kwargs):
+            self.calls.append(kwargs)
+
+        def head_bucket(self, **kwargs):
+            return {}
+
+    @staticmethod
+    def _without_botocore():
+        import builtins
+
+        real_import = builtins.__import__
+
+        def blocked(name, *args, **kwargs):
+            if name == "botocore" or name.startswith("botocore."):
+                raise ImportError("simulated: botocore not installed")
+            return real_import(name, *args, **kwargs)
+
+        return patch.object(builtins, "__import__", blocked)
+
+    def test_client_is_still_constructed_when_botocore_is_missing(self):
+        from flow_doctor.notify import s3 as s3_module
+
+        fake_boto3 = MagicMock()
+        fake_boto3.client = MagicMock(return_value=self._StubClient())
+        with patch.dict(sys.modules, {"boto3": fake_boto3}), self._without_botocore():
+            client = s3_module._bounded_s3_client()
+
+        assert client is not None
+        # Constructed WITHOUT a config — there is no botocore to build one from,
+        # and a stub client has no socket to bound.
+        assert fake_boto3.client.call_args.kwargs.get("config") is None
+
+    def test_a_missing_botocore_is_reported_not_swallowed(self, caplog):
+        from flow_doctor.notify import s3 as s3_module
+
+        fake_boto3 = MagicMock()
+        fake_boto3.client = MagicMock(return_value=self._StubClient())
+        with patch.dict(sys.modules, {"boto3": fake_boto3}), self._without_botocore():
+            with caplog.at_level("WARNING"):
+                s3_module._bounded_s3_client()
+
+        assert any(
+            "botocore unavailable" in r.message or "botocore unavailable" in r.getMessage()
+            for r in caplog.records
+        ), "an unbounded client must say so — silence here is how I9102 comes back"
+
+    def test_the_bound_is_applied_when_botocore_is_present(self):
+        """The other half: where botocore exists, the timeouts are real.
+
+        Skipped where it is not installed — CI runs without boto3, and asserting
+        a botocore-built Config there would test the environment, not the code.
+        """
+        pytest.importorskip(
+            "botocore.config",
+            reason="botocore absent — the bound cannot be built, which the "
+            "sibling tests in this class already cover",
+        )
+        from flow_doctor.notify import s3 as s3_module
+
+        fake_boto3 = MagicMock()
+        fake_boto3.client = MagicMock(return_value=self._StubClient())
+        with patch.dict(sys.modules, {"boto3": fake_boto3}):
+            s3_module._bounded_s3_client()
+
+        config = fake_boto3.client.call_args.kwargs.get("config")
+        assert config is not None, "botocore is installed here; the bound must apply"
+        assert config.connect_timeout == 3
+        assert config.read_timeout == 5
