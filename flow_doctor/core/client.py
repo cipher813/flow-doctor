@@ -8,6 +8,7 @@ import logging
 import os
 import platform
 import sys
+import threading
 import time
 import traceback as tb_module
 from contextlib import contextmanager
@@ -384,9 +385,9 @@ class FlowDoctor:
     def _run_notifier_preflights(self, notifiers: List[Notifier]) -> None:
         """Validate every notifier, bounded in time and tolerant of transport.
 
-        Two invariants this enforces at the CLASS level, so they hold for
+        Three invariants this enforces at the CLASS level, so they hold for
         third-party notifiers too and not only for the ones shipped here
-        (alpha-engine-config-I8298):
+        (alpha-engine-config-I8298, alpha-engine-config-I9102):
 
         1. **A transport failure never crashes the caller.** An unreachable
            notification endpoint is an ``OSError`` family failure — timeout,
@@ -401,16 +402,56 @@ class FlowDoctor:
            spent, the remaining notifiers are skipped and NAMED in a
            warning — never silently dropped, because "unvalidated" and
            "validated fine" must not look the same.
+        3. **No single notifier's ``validate()`` can itself exceed the
+           budget.** The pre-check in (2) only gated whether the NEXT
+           notifier started — it did nothing about a call already in
+           flight. A notifier whose own transport has no internal bound
+           (e.g. a bare ``boto3.client()``, whose default is
+           connect_timeout=60s / read_timeout=60s / up to 5 retries — tens
+           of minutes worst case) could single-handedly consume the whole
+           host process's timeout regardless of this budget
+           (alpha-engine-config-I9102: exactly this turned a Lambda's 1.6s
+           of real handler work into a 300s timeout). Each ``validate()``
+           therefore runs on its own daemon thread and is joined with a
+           HARD deadline; a notifier that blows its deadline is marked
+           UNVALIDATED and preflight moves on without waiting for it. The
+           abandoned thread keeps running (Python cannot kill a thread),
+           but it is daemon — it never blocks this process from returning
+           or exiting, which is the property that actually matters here.
         """
         deadline = time.monotonic() + self._preflight_budget()
         skipped: List[str] = []
         for _n in notifiers:
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 skipped.append(type(_n).__name__)
                 continue
-            try:
-                _n.validate()
-            except OSError as exc:
+
+            result: Dict[str, Any] = {}
+
+            def _call(_notifier=_n, _result=result) -> None:
+                try:
+                    _notifier.validate()
+                except BaseException as exc:  # noqa: BLE001 - relayed to the main thread below
+                    _result["exc"] = exc
+
+            worker = threading.Thread(target=_call, daemon=True)
+            worker.start()
+            worker.join(timeout=remaining)
+
+            if worker.is_alive():
+                # Hit the hard per-notifier deadline with the call still in
+                # flight. Same UNVALIDATED disposition as budget-exhausted
+                # (2) — never silently indistinguishable from "validated
+                # fine" — but reported separately so a stuck notifier reads
+                # differently from one that simply never got a turn.
+                skipped.append(f"{type(_n).__name__} (timed out mid-call)")
+                continue
+
+            exc = result.get("exc")
+            if exc is None:
+                continue
+            if isinstance(exc, OSError):
                 print(
                     f"[flow-doctor] WARNING: {PREFLIGHT_UNREACHABLE_MARKER} "
                     f"{type(_n).__name__} preflight could not reach "
@@ -420,6 +461,8 @@ class FlowDoctor:
                     f"it watches.",
                     file=sys.stderr,
                 )
+            else:
+                raise exc
         if skipped:
             print(
                 f"[flow-doctor] WARNING: {PREFLIGHT_UNVALIDATED_MARKER} "

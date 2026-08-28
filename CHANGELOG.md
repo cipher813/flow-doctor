@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.16.2 (2026-08-28)
+
+### Fixed
+
+- **A notifier preflight can no longer block `FlowDoctor.__init__` past its own budget, even mid-call** (alpha-engine-config-I9102). 0.16.0/0.16.1 (I8298) bounded the preflight loop by checking the shared deadline *before starting* each notifier's `validate()` — that did nothing for a call already in flight. `S3Notifier.validate()`, `_put_object()` and `write_heartbeat()` all constructed a bare `boto3.client("s3")`, whose botocore default has no explicit timeout (`connect_timeout=60s`, `read_timeout=60s`, up to 5 retries) — a single degraded S3 call could burn several minutes with no cap. On `alpha-engine-research-eval-rolling-mean`'s 2026-08-28 off-cycle rehearsal, this ran the handler's own 1.6s of completed work behind a 300s Lambda `States.Timeout`, and the trend across the prior ten invocations (20-37s baseline, climbing to 120.2s, 65.3s, then the timeout) showed it degrading in production.
+
+  Two changes close this at the class level, so third-party notifiers are covered too, not just the ones shipped here:
+
+  1. Every S3 client this module constructs now goes through a shared `_bounded_s3_client()` (`connect_timeout=3`, `read_timeout=5`, `max_attempts=2`) instead of an unbounded default.
+  2. `FlowDoctor._run_notifier_preflights` now runs each notifier's `validate()` on its own daemon thread and joins it with a **hard** deadline. A notifier that has not returned by its deadline is marked `UNVALIDATED (timed out mid-call)` and preflight moves on without it — the abandoned thread keeps running, but being daemon, it can never again hold up the process that owns it.
+
+  `tests/test_notifier_preflight_budget.py::test_slow_call_in_flight_does_not_block_past_the_budget` is the regression test — it fails (blocks ~5s against a 0.1s budget) against the pre-fix code and passes with the fix.
+
 ## 0.16.1 (2026-08-25)
 
 ### Added

@@ -67,6 +67,31 @@ SEVERITY_MAP: Dict[str, str] = {
     "warning": "medium",
 }
 
+# botocore's default client has NO explicit timeout — connect_timeout=60,
+# read_timeout=60, and "legacy" retry mode retries up to 5 times, each
+# incurring a fresh connect+read cycle on a connection failure. A single
+# ``boto3.client("s3")`` call with no ``Config`` can therefore hang for
+# several minutes on a degraded network path (a stalled NAT/VPC endpoint,
+# a throttled S3 API). ``validate()`` runs this synchronously inside
+# ``FlowDoctor.__init__``, on every cold start, before the host app's own
+# handler code runs — an unbounded S3 call there is a producer-killing
+# defect, not a cosmetic slowness (alpha-engine-config-I9102: this exact
+# path put a Lambda's own 1.6s of work behind a 300s timeout). Bound every
+# S3 client this module constructs so the worst case for one call is
+# ~(connect_timeout + read_timeout) * max_attempts, not an open-ended hang.
+def _bounded_s3_client():
+    import boto3
+    from botocore.config import Config as _BotoConfig
+
+    return boto3.client(
+        "s3",
+        config=_BotoConfig(
+            connect_timeout=3,
+            read_timeout=5,
+            retries={"max_attempts": 2, "mode": "standard"},
+        ),
+    )
+
 
 class S3Notifier(Notifier):
     """Send flow-doctor reports to the system-wide changelog S3 corpus.
@@ -144,7 +169,7 @@ class S3Notifier(Notifier):
                 "pip install 'flow-doctor[s3]'"
             ) from e
         try:
-            client = boto3.client("s3")
+            client = _bounded_s3_client()
             client.head_bucket(Bucket=self.bucket)
         except Exception as e:  # noqa: BLE001
             # Soft-fail like GitHubNotifier on transient/network — don't
@@ -221,8 +246,7 @@ class S3Notifier(Notifier):
         # Lazy import keeps boto3 a soft dep — flow-doctor's other notifiers
         # don't need it, so installs that don't use the s3 type don't need
         # to pull it in.
-        import boto3
-        client = boto3.client("s3")
+        client = _bounded_s3_client()
         client.put_object(
             Bucket=self.bucket,
             Key=key,
@@ -277,8 +301,7 @@ def write_heartbeat(
             "status": status,
         }
         # Lazy import keeps boto3 a soft dep, matching S3Notifier._put_object.
-        import boto3
-        client = boto3.client("s3")
+        client = _bounded_s3_client()
         client.put_object(
             Bucket=bucket,
             Key=key,
