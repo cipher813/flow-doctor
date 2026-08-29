@@ -1,0 +1,182 @@
+# .provider-linkage-allowlist.yaml -- baseline for provider_linkage_guard.py
+# (nousergon-lib scripts/provider_linkage_guard.py, PR371)
+#
+# Brian's 2026-08-29 ruling: "the entire nous ergon system should now be
+# running through the krepis router... we should have no other parallel
+# setups, it should all funnel through the krepis router."
+# alpha-engine-config-I9295 (spine I9294).
+#
+# Every entry pre-clears a KNOWN match that is not a Nous-Ergon-internal
+# provider bypass. An entry whose `expires` has passed fails LOUDLY --
+# re-justify or remove, never silently re-grandfather. An entry that no
+# longer matches anything ALSO fails, so the allowance cannot quietly widen
+# after the thing it covered is gone.
+#
+# `pattern` is the namespaced `<provider>:<class>` identifier the guard
+# reports. The key is (path, pattern) -- one entry covers every line in that
+# file matching that class.
+
+entries:
+
+  # -- flow-doctor's documented dual-mode diagnosis/fix transport --
+  #
+  # flow_doctor.diagnosis.provider defines TWO providers behind the same
+  # DiagnosisProvider contract: RouterProvider (krepis capability-group
+  # resolution -- what Nous Ergon's OWN flow-doctor installs use, per its
+  # docstring and model-router-policy.md layer 5: "a consumer applies the
+  # router's resolution contract verbatim and holds no routing table of its
+  # own") and OpenAICompatProvider (a direct OpenAI-compatible client).
+  # flow-doctor is a public, pip-installable OSS tool (`policy-repository-
+  # tiering`); OpenAICompatProvider is the documented escape hatch for
+  # self-hosters and external PyPI consumers who are not Nous Ergon and have
+  # no krepis access -- "a self-hoster or external PyPI user with their own
+  # OpenAI-compatible endpoint keeps using OpenAICompatProvider exactly as
+  # before -- no krepis required" (flow_doctor/diagnosis/provider.py). The
+  # reusable fix.yml workflow makes this explicit: OPENROUTER_API_KEY is
+  # "unused, and not required, under provider: router". This is product
+  # surface for an audience outside the nous-ergon system the ruling scopes,
+  # not a parallel setup inside it.
+
+  - path: flow_doctor/diagnosis/provider.py
+    pattern: openai:sdk_client
+    reason: >-
+      OpenAICompatProvider's OpenAI-compatible chat-completions client -- the
+      documented non-krepis transport for external self-hosted/PyPI
+      consumers. RouterProvider (krepis-routed) is what Nous Ergon's own
+      installs use.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9295
+
+  - path: flow_doctor/diagnosis/provider.py
+    pattern: openrouter:base_url
+    reason: >-
+      OpenAICompatProvider._is_openrouter() checks its own configured
+      base_url to decide whether to opt into OpenRouter's billed-cost
+      usage field -- not a hardcoded linkage, a branch on caller-supplied
+      config for the external openai_compat path.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9295
+
+  - path: flow_doctor/fix/generator.py
+    pattern: openai:sdk_client
+    reason: >-
+      Mirrors diagnosis/provider.py's OpenAICompatProvider transport for the
+      fix-generation path -- same documented external/self-host escape
+      hatch, not a Nous Ergon call site (RouterProvider is used instead
+      there).
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9295
+
+  - path: flow_doctor/fix/cli.py
+    pattern: openrouter:env_key
+    reason: >-
+      CLI config plumbing and error messages for the `diagnosis.provider:
+      openai_compat` path (env-var fallback + help text). Optional and
+      unused when a caller sets `provider: router`.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9295
+
+  - path: .github/workflows/fix.yml
+    pattern: openrouter:env_key
+    reason: >-
+      Reusable fix workflow's OPENROUTER_API_KEY secret, explicitly declared
+      `required: false` and documented as "unused, and not required, under
+      provider: router" -- only consumed by callers that opt into the
+      openai_compat transport.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9295
+
+  - path: .github/workflows/flow-doctor-fix.yml
+    pattern: openrouter:env_key
+    reason: >-
+      Same OPENROUTER_API_KEY secret/comment as .github/workflows/fix.yml --
+      the openai_compat opt-in path, not required under provider: router.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9295
+
+  # -- test fixtures exercising the openai_compat path --
+  #
+  # Literal base_url/env-var strings asserted in tests against the
+  # documented external-consumer transport above. No network call is made
+  # and no key is held.
+
+  - path: tests/test_default_model_canonical.py
+    pattern: openrouter:base_url
+    reason: >-
+      Fixture asserting OpenAICompatProvider's default base_url handling.
+      No live call.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9295
+
+  - path: tests/test_diagnosis_provider.py
+    pattern: openrouter:base_url
+    reason: >-
+      Fixture constructing an OpenAICompatProvider against a literal
+      openrouter.ai base_url to test _is_openrouter() branching. No live
+      call.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9295
+
+  - path: tests/test_endpoint_defaults.py
+    pattern: openrouter:base_url
+    reason: >-
+      Docstring + assertion covering the same OpenAICompatProvider default-
+      endpoint behavior. No live call.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9295
+
+  - path: tests/test_fix_cli.py
+    pattern: openrouter:env_key
+    reason: >-
+      Fixture config/env for the fix CLI's openai_compat path
+      (monkeypatched, not a real credential). No live call.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9295
+
+  - path: tests/test_phase2_integration.py
+    pattern: openrouter:base_url
+    reason: >-
+      Integration fixture exercising the openai_compat transport end to end
+      against a fake endpoint. No live call.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9295
+
+  - path: tests/test_remediation_pipeline.py
+    pattern: openrouter:base_url
+    reason: >-
+      Remediation-pipeline fixture config for the openai_compat transport.
+      No live call.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9295
+
+  # -- a secret-scanner's name list --
+  #
+  # Same shape as nousergon-lib's tests/test_secret_scan.py entry: naming a
+  # credential VARIABLE NAME in order to redact it is the opposite of
+  # holding one.
+
+  - path: flow_doctor/core/scrubber.py
+    pattern: anthropic:env_key
+    reason: >-
+      Scrubber._SECRET_ENV_NAMES -- a list of env-var NAMES this redaction
+      utility recognizes and blanks from error context/tracebacks. It never
+      reads or transmits the value; it exists to keep it out of logs.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9295
+
+  - path: flow_doctor/core/scrubber.py
+    pattern: openai:env_key
+    reason: >-
+      Same Scrubber._SECRET_ENV_NAMES list -- see the anthropic entry above.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9295
+
+  - path: tests/test_fail_loud.py
+    pattern: anthropic:env_key
+    reason: >-
+      Fixture asserting flow-doctor fails loud when neither
+      FLOW_DOCTOR_ANTHROPIC_API_KEY nor ANTHROPIC_API_KEY is required by the
+      current provider config -- exercises the removed-in-0.15.0
+      `provider: anthropic` rejection path by name, not a live client.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9295
